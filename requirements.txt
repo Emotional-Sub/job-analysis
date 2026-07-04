@@ -1,0 +1,22 @@
+# ===== 采集层 =====
+playwright==1.49.0          # 动态渲染 / 登录页爬取
+
+# ===== 存储层 =====
+SQLAlchemy==2.0.36          # ORM
+PyMySQL==1.1.1              # MySQL 驱动
+cryptography==44.0.0        # PyMySQL 连接 MySQL8 caching_sha2 认证需要
+
+# ===== 数据处理 =====
+pandas==2.2.3
+
+# ===== 配置 =====
+python-dotenv==1.0.1        # 读取 .env 里的数据库密码等
+
+# ===== 加分项:定时爬取 =====
+APScheduler==3.11.0
+
+# ===== 加分项:预测模型 =====
+scikit-learn==1.6.0
+
+# ===== 展示层(后续做 Web 时再用,先列在这) =====
+Flask==3.1.0
