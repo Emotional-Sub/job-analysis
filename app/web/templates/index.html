@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>招聘数据可视化分析平台</title>
+    <!-- ECharts 从 CDN 引入,不用本地安装 -->
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+            background: #f0f2f5;
+            color: #333;
+        }
+        .header {
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: #fff;
+            padding: 24px 40px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+        }
+        .header h1 { font-size: 24px; font-weight: 600; }
+        .header p { font-size: 13px; opacity: 0.8; margin-top: 6px; }
+
+        .container { max-width: 1400px; margin: 0 auto; padding: 24px; }
+
+        /* 概览卡片 */
+        .overview {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+            margin-bottom: 24px;
+        }
+        .card {
+            background: #fff;
+            border-radius: 10px;
+            padding: 24px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+            text-align: center;
+        }
+        .card .num {
+            font-size: 32px;
+            font-weight: 700;
+            color: #2a5298;
+        }
+        .card .label {
+            font-size: 14px;
+            color: #888;
+            margin-top: 8px;
+        }
+
+        /* 图表网格 */
+        .charts {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+        }
+        .chart-box {
+            background: #fff;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+        }
+        .chart-box h3 {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 12px;
+            padding-left: 10px;
+            border-left: 4px solid #2a5298;
+        }
+        .chart { width: 100%; height: 340px; }
+        .full-width { grid-column: 1 / -1; }
+
+        .footer {
+            text-align: center;
+            padding: 24px;
+            color: #aaa;
+            font-size: 13px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>招聘数据可视化分析平台</h1>
+        <p>基于 Python 爬虫 + Flask + ECharts | 数据来源:招聘网站</p>
+    </div>
+
+    <div class="container">
+        <!-- 概览卡片:服务端已渲染进来 -->
+        <div class="overview">
+            <div class="card">
+                <div class="num">{{ overview.total }}</div>
+                <div class="label">岗位总数</div>
+            </div>
+            <div class="card">
+                <div class="num">{{ overview.city_count }}</div>
+                <div class="label">覆盖城市数</div>
+            </div>
+            <div class="card">
+                <div class="num">{{ overview.avg_salary }}K</div>
+                <div class="label">平均月薪</div>
+            </div>
+            <div class="card">
+                <div class="num">{{ overview.max_salary }}K</div>
+                <div class="label">最高月薪</div>
+            </div>
+        </div>
+
+        <!-- 图表区 -->
+        <div class="charts">
+            <div class="chart-box">
+                <h3>各职位平均薪资</h3>
+                <div id="chart_salary_kw" class="chart"></div>
+            </div>
+            <div class="chart-box">
+                <h3>各城市岗位数量 Top 10</h3>
+                <div id="chart_jobs_city" class="chart"></div>
+            </div>
+            <div class="chart-box">
+                <h3>各城市平均薪资 Top 10</h3>
+                <div id="chart_salary_city" class="chart"></div>
+            </div>
+            <div class="chart-box">
+                <h3>技能需求热度 Top 20</h3>
+                <div id="chart_skills" class="chart"></div>
+            </div>
+            <div class="chart-box">
+                <h3>学历要求分布</h3>
+                <div id="chart_education" class="chart"></div>
+            </div>
+            <div class="chart-box">
+                <h3>经验要求分布</h3>
+                <div id="chart_experience" class="chart"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="footer">招聘数据可视化分析平台 · 毕业设计</div>
+
+    <script>
+    // 统一的取数函数
+    async function fetchJSON(url) {
+        const resp = await fetch(url);
+        return await resp.json();
+    }
+
+    // 主题色
+    const COLORS = ['#2a5298', '#5b8ff9', '#61ddaa', '#f6bd16', '#e8684a',
+                    '#6dc8ec', '#9270ca', '#ff9d4d', '#269a99', '#5d7092'];
+
+    // 1. 各职位平均薪资(横向柱状图)
+    fetchJSON('/api/salary_by_keyword').then(d => {
+        const chart = echarts.init(document.getElementById('chart_salary_kw'));
+        chart.setOption({
+            tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+            grid: { left: '15%', right: '8%', top: '8%', bottom: '8%' },
+            xAxis: { type: 'value', name: '月薪(K)' },
+            yAxis: { type: 'category', data: d.keywords },
+            series: [{
+                type: 'bar',
+                data: d.salaries,
+                itemStyle: { color: '#2a5298', borderRadius: [0, 4, 4, 0] },
+                label: { show: true, position: 'right', formatter: '{c}K' }
+            }]
+        });
+    });
+
+    // 2. 各城市岗位数量(纵向柱状图)
+    fetchJSON('/api/jobs_by_city').then(d => {
+        const chart = echarts.init(document.getElementById('chart_jobs_city'));
+        chart.setOption({
+            tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+            grid: { left: '8%', right: '5%', top: '8%', bottom: '12%' },
+            xAxis: { type: 'category', data: d.cities, axisLabel: { rotate: 30 } },
+            yAxis: { type: 'value', name: '岗位数' },
+            series: [{
+                type: 'bar',
+                data: d.counts,
+                itemStyle: { color: '#61ddaa', borderRadius: [4, 4, 0, 0] }
+            }]
+        });
+    });
+
+    // 3. 各城市平均薪资(纵向柱状图)
+    fetchJSON('/api/salary_by_city').then(d => {
+        const chart = echarts.init(document.getElementById('chart_salary_city'));
+        chart.setOption({
+            tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+            grid: { left: '8%', right: '5%', top: '8%', bottom: '12%' },
+            xAxis: { type: 'category', data: d.cities, axisLabel: { rotate: 30 } },
+            yAxis: { type: 'value', name: '月薪(K)' },
+            series: [{
+                type: 'bar',
+                data: d.salaries,
+                itemStyle: { color: '#f6bd16', borderRadius: [4, 4, 0, 0] },
+                label: { show: true, position: 'top', formatter: '{c}K' }
+            }]
+        });
+    });
+
+    // 4. 技能需求热度(横向柱状图,替代词云,无需额外插件)
+    fetchJSON('/api/skills').then(d => {
+        const chart = echarts.init(document.getElementById('chart_skills'));
+        // 数据是 [{name, value}],取前若干,倒序让最高的在顶部
+        const items = d.slice().reverse();
+        chart.setOption({
+            tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+            grid: { left: '20%', right: '8%', top: '5%', bottom: '5%' },
+            xAxis: { type: 'value', name: '需求量' },
+            yAxis: { type: 'category', data: items.map(i => i.name) },
+            series: [{
+                type: 'bar',
+                data: items.map(i => i.value),
+                itemStyle: { color: '#e8684a', borderRadius: [0, 4, 4, 0] }
+            }]
+        });
+    });
+
+    // 5. 学历要求分布(饼图)
+    fetchJSON('/api/education').then(d => {
+        const chart = echarts.init(document.getElementById('chart_education'));
+        chart.setOption({
+            tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
+            legend: { bottom: 0 },
+            color: COLORS,
+            series: [{
+                type: 'pie',
+                radius: ['40%', '65%'],
+                center: ['50%', '45%'],
+                data: d,
+                label: { formatter: '{b}\n{d}%' }
+            }]
+        });
+    });
+
+    // 6. 经验要求分布(饼图)
+    fetchJSON('/api/experience').then(d => {
+        const chart = echarts.init(document.getElementById('chart_experience'));
+        chart.setOption({
+            tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
+            legend: { bottom: 0 },
+            color: COLORS,
+            series: [{
+                type: 'pie',
+                radius: ['40%', '65%'],
+                center: ['50%', '45%'],
+                data: d,
+                label: { formatter: '{b}\n{d}%' }
+            }]
+        });
+    });
+
+    // 窗口缩放时图表自适应
+    window.addEventListener('resize', () => {
+        document.querySelectorAll('.chart').forEach(el => {
+            const inst = echarts.getInstanceByDom(el);
+            if (inst) inst.resize();
+        });
+    });
+    </script>
+</body>
+</html>
