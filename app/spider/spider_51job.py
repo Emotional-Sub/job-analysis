@@ -14,6 +14,7 @@
 你打开页面用开发者工具核对后微调。这是爬虫项目的常态,不是 bug。
 """
 import hashlib
+import json
 import time
 from typing import List, Dict
 
@@ -96,8 +97,11 @@ SAMPLE_RAW: List[Dict] = [
 def _make_job_key(raw: Dict) -> str:
     """
     生成站点内岗位唯一标识,用于去重。
-    优先用详情页 url;没有 url 时用 标题+公司+城市 拼一个哈希。
+    优先用站点官方岗位 id(sensorsdata 里的 jobId),最稳定;
+    没有就退而用详情页 url;再没有就用 标题+公司+城市 拼哈希。
     """
+    if raw.get("job_key"):
+        return str(raw["job_key"])
     url = raw.get("url")
     if url:
         return url
@@ -130,6 +134,7 @@ def clean_and_save(raw_list: List[Dict]) -> int:
                 title=raw.get("title"),
                 company=raw.get("company"),
                 city=raw.get("city"),
+                industry=raw.get("industry"),
                 salary_text=raw.get("salary_text"),
                 salary_min=lo,
                 salary_max=hi,
@@ -163,12 +168,35 @@ def run_demo() -> None:
 def _extract_cards(page) -> List[Dict]:
     """
     从当前搜索结果页提取岗位卡片。
-    ⚠️ 选择器需要你对照 51job 实际页面核对/微调。
-    这里给出的是常见结构示意。
+
+    51job 每个岗位卡片上都挂了一个 sensorsdata 属性,里面是完整的岗位 JSON
+    (jobId/jobTitle/jobSalary/jobArea/jobYear/jobDegree/companyId 等),
+    这是埋点数据。我们优先解析它 —— 比逐个抠 DOM 文本可靠得多,
+    不怕布局变动、不怕文本里混入空格换行。
+
+    公司名、行业、详情链接埋点里没有,再从 DOM 补充。
     """
     cards = []
-    items = page.query_selector_all(".joblist .joblist-item, .j_joblist .e")
+    items = page.query_selector_all(".joblist-item")
     for it in items:
+        # 埋点属性可能在自身或子元素上
+        raw = it.get_attribute("sensorsdata")
+        if not raw:
+            inner = it.query_selector("[sensorsdata]")
+            raw = inner.get_attribute("sensorsdata") if inner else None
+        if not raw:
+            continue
+
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+
+        # jobArea 形如 "成都·青羊区",取 · 前面作为城市
+        area_full = data.get("jobArea") or ""
+        city = area_full.split("·")[0].strip() if area_full else None
+
+        # DOM 补充:公司名 / 行业 / 详情链接
         def _txt(sel):
             el = it.query_selector(sel)
             return el.inner_text().strip() if el else None
@@ -177,15 +205,22 @@ def _extract_cards(page) -> List[Dict]:
             el = it.query_selector(sel)
             return el.get_attribute(attr) if el else None
 
+        company = _txt(".cname") or _attr(".cname", "title")
+        industry = _txt(".bc .dc:first-child") or _attr(".bc .dc:first-child", "title")
+        detail_url = _attr("a.comp", "href")
+
         cards.append({
-            "title": _txt(".jname, .job-title"),
-            "company": _txt(".cname, .company-name"),
-            "salary_text": _txt(".sal, .salary"),
-            "city": _txt(".d.at, .job-area"),
-            "education_text": None,   # 51job 学历常在详情/属性行,按需补充
-            "experience_text": None,
-            "tags_text": _txt(".tags, .job-tags"),
-            "url": _attr("a", "href"),
+            "job_key": data.get("jobId"),          # 用官方 jobId 去重,最稳
+            "title": data.get("jobTitle"),
+            "salary_text": data.get("jobSalary"),
+            "city": city,
+            "area": area_full,
+            "education_text": data.get("jobDegree"),
+            "experience_text": data.get("jobYear"),
+            "tags_text": None,                      # 福利标签意义不大,先不抓
+            "company": company,
+            "industry": industry,
+            "url": detail_url,
         })
     return cards
 
@@ -200,8 +235,12 @@ def run_real() -> None:
     init_db()
     total = 0
 
+    first_login = not os.path.exists(config.STORAGE_STATE)
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=config.HEADLESS)
+        # channel="chrome" 直接驱动你系统安装的 Chrome,不用另下 chromium 内核
+        # 调试期建议 HEADLESS=False(在 .env 里设),能看到浏览器、方便过验证
+        browser = p.chromium.launch(channel="chrome", headless=config.HEADLESS)
         # 复用已保存的登录状态(如果有)
         ctx_kwargs = {}
         if os.path.exists(config.STORAGE_STATE):
@@ -209,16 +248,31 @@ def run_real() -> None:
         context = browser.new_context(**ctx_kwargs)
         page = context.new_page()
 
+        # 首次运行:先打开首页,给你时间手动登录/过滑块,回车后继续并保存状态
+        if first_login:
+            page.goto("https://we.51job.com/pc/search?keyword=Python", timeout=60000)
+            print("\n" + "=" * 50)
+            print("首次运行:请在弹出的 Chrome 里完成登录/滑块验证,")
+            print("看到岗位列表后,回到本终端按【回车】继续抓取。")
+            print("=" * 50)
+            input()
+            context.storage_state(path=config.STORAGE_STATE)
+            print(f"[real] 登录状态已保存到 {config.STORAGE_STATE}")
+
         for kw in config.KEYWORDS:
             kw = kw.strip()
             print(f"[real] 搜索关键词: {kw}")
             for pg in range(1, config.MAX_PAGES + 1):
-                # 51job 搜索 URL 结构(示意,可能需按实际调整)
                 url = (
                     f"https://we.51job.com/pc/search?keyword={kw}"
                     f"&searchType=2&pageNum={pg}"
                 )
                 page.goto(url, timeout=60000)
+                # 等岗位卡片真正渲染出来(动态加载),最多等 15 秒
+                try:
+                    page.wait_for_selector(".joblist-item", timeout=15000)
+                except Exception:
+                    print(f"  第 {pg} 页:等不到岗位卡片,可能被反爬拦截或没有结果")
                 page.wait_for_timeout(int(config.REQUEST_DELAY * 1000))
 
                 cards = _extract_cards(page)
@@ -230,8 +284,11 @@ def run_real() -> None:
                 print(f"  第 {pg} 页,抓到 {len(cards)} 条")
                 time.sleep(config.REQUEST_DELAY)
 
-        # 保存登录状态,方便下次复用
+        # 更新登录状态,方便下次复用
         context.storage_state(path=config.STORAGE_STATE)
         browser.close()
 
     print(f"[real] 完成,累计新增 {total} 条。")
+    if total == 0:
+        print("[提示] 新增 0 条。若之前已抓过会因去重跳过;若首次就 0 条,")
+        print("       多半是登录态/反爬问题,把 HEADLESS 设为 False 观察页面。")
