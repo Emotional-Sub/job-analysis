@@ -370,6 +370,7 @@ def run_real() -> None:
                 except Exception:
                     pass
 
+        context.storage_state(path=LIEPIN_STORAGE_STATE)
         browser.close()
 
     print(f"[liepin] 完成,累计新增 {total} 条。")

@@ -49,31 +49,7 @@
             margin-top: 8px;
         }
 
-        /* 图表网格 */
-        .charts {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 20px;
-        }
-        .chart-box {
-            background: #fff;
-            border-radius: 10px;
-            padding: 20px;
-            box-shadow: 0 1px 4px rgba(0,0,0,0.08);
-        }
-        .chart-box h3 {
-            font-size: 16px;
-            font-weight: 600;
-            margin-bottom: 12px;
-            padding-left: 10px;
-            border-left: 4px solid #2a5298;
-        }
-        .chart { width: 100%; height: 340px; }
-        .full-width { grid-column: 1 / -1; }
-        /* 技能图有 20 条,需要更高的画布,否则底部条目和 X 轴被挤掉 */
-        .chart-tall { height: 560px; }
-
-        /* 薪资预测卡片 */
+        /* 薪资预测交互卡片 */
         .predict-box {
             background: #fff;
             border-radius: 10px;
@@ -86,22 +62,26 @@
             font-weight: 600;
             margin-bottom: 16px;
             padding-left: 10px;
-            border-left: 4px solid #2a5298;
+            border-left: 4px solid #e8684a;
         }
         .predict-form {
             display: flex;
             flex-wrap: wrap;
-            gap: 12px;
+            gap: 16px;
             align-items: flex-end;
         }
-        .predict-field { display: flex; flex-direction: column; gap: 4px; }
-        .predict-field label { font-size: 13px; color: #888; }
+        .predict-field { display: flex; flex-direction: column; }
+        .predict-field label {
+            font-size: 13px;
+            color: #888;
+            margin-bottom: 6px;
+        }
         .predict-field select {
-            padding: 8px 10px;
-            border: 1px solid #dcdfe6;
+            padding: 8px 12px;
+            border: 1px solid #ddd;
             border-radius: 6px;
             font-size: 14px;
-            min-width: 120px;
+            min-width: 130px;
             background: #fff;
         }
         .predict-btn {
@@ -141,6 +121,30 @@
         .model-table th { background: #f5f7fa; color: #555; }
         .model-table tr.best td { background: #eef4ff; font-weight: 600; }
         .model-note { font-size: 12px; color: #aaa; margin-top: 8px; }
+
+        /* 图表网格 */
+        .charts {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+        }
+        .chart-box {
+            background: #fff;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+        }
+        .chart-box h3 {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 12px;
+            padding-left: 10px;
+            border-left: 4px solid #2a5298;
+        }
+        .chart { width: 100%; height: 340px; }
+        .full-width { grid-column: 1 / -1; }
+        /* 技能图有 20 条,需要更高的画布,否则底部条目和 X 轴被挤掉 */
+        .chart-tall { height: 560px; }
 
         .footer {
             text-align: center;
@@ -330,58 +334,52 @@
         });
     });
 
-    // 城市岗位分布地图:中国轮廓做底图,城市散点(大小=岗位数,颜色=薪资)。
-    // 先加载本地 china.json 注册地图,再画散点,全程离线不依赖 CDN。
-    fetchJSON('/static/maps/china.json').then(geoJson => {
-        echarts.registerMap('china', geoJson);
-        return fetchJSON('/api/city_geo');
-    }).then(d => {
+    // 全国岗位地理分布(散点地图:点大小=岗位数,颜色=薪资中位数)
+    // 先加载本地打包的中国地图 GeoJSON(离线,不依赖 CDN),注册后再画散点。
+    Promise.all([
+        fetch('/static/maps/china.json').then(r => r.json()),
+        fetchJSON('/api/city_geo')
+    ]).then(([geo, points]) => {
+        echarts.registerMap('china', geo);
         const chart = echarts.init(document.getElementById('chart_map'));
-        // 散点大小按岗位数缩放:开方后乘系数,避免大城市点过大盖住小城市
-        const maxCnt = Math.max(...d.map(i => i.value[2]), 1);
-        // 薪资范围供 visualMap 上色(过滤掉 salary 为 null 的)
-        const sals = d.map(i => i.salary).filter(v => v != null);
-        const minSal = sals.length ? Math.min(...sals) : 0;
-        const maxSal = sals.length ? Math.max(...sals) : 1;
+        const sals = points.map(p => p.salary).filter(v => v != null);
+        const maxCnt = Math.max(...points.map(p => p.value[2]), 1);
         chart.setOption({
             tooltip: {
                 trigger: 'item',
                 formatter: p => {
-                    if (!p.data) return p.name;
-                    const v = p.data.value;
-                    const sal = p.data.salary != null ? p.data.salary + 'K' : '无数据';
-                    return `${p.data.name}<br/>岗位数: ${v[2]}<br/>薪资中位数: ${sal}`;
+                    const v = p.data;
+                    if (!v || !v.value) return p.name;
+                    return `${v.name}<br/>岗位数: ${v.value[2]}<br/>薪资中位数: ${v.salary == null ? '—' : v.salary + 'K'}`;
                 }
             },
             visualMap: {
-                min: minSal, max: maxSal,
-                left: 'left', bottom: '5%',
+                min: Math.min(...sals, 0),
+                max: Math.max(...sals, 1),
+                left: 'left',
+                bottom: '5%',
                 text: ['高薪', '低薪'],
-                dimension: 3,          // 用 value 之外的 salary 维度上色(见 series 里的 encode)
                 calculable: true,
                 inRange: { color: ['#5b8ff9', '#f6bd16', '#e8684a'] },
-                textStyle: { color: '#666' }
+                dimension: 'salary'
             },
             geo: {
                 map: 'china',
-                roam: true,            // 允许缩放/拖动
-                itemStyle: { areaColor: '#f3f5f9', borderColor: '#c8d1dc' },
-                emphasis: { itemStyle: { areaColor: '#e6ebf2' }, label: { show: false } }
+                roam: true,
+                itemStyle: { areaColor: '#f3f5f9', borderColor: '#cdd5e0' },
+                emphasis: { itemStyle: { areaColor: '#e6ecf5' }, label: { show: false } }
             },
             series: [{
                 type: 'scatter',
                 coordinateSystem: 'geo',
-                // 每个点带 salary,visualMap 的 dimension:3 会读它上色
-                data: d.map(i => ({
-                    name: i.name,
-                    value: [i.value[0], i.value[1], i.value[2], i.salary],
-                    salary: i.salary
+                data: points.map(p => ({
+                    name: p.name,
+                    value: p.value,       // [经度, 纬度, 岗位数]
+                    salary: p.salary
                 })),
-                symbolSize: val => 10 + 40 * Math.sqrt(val[2] / maxCnt),
-                label: {
-                    show: true, position: 'right',
-                    formatter: p => p.data.name, fontSize: 11, color: '#333'
-                },
+                // 点大小按岗位数缩放(8~40 像素)
+                symbolSize: v => 8 + (v[2] / maxCnt) * 32,
+                encode: { value: 2 },
                 itemStyle: { opacity: 0.85 }
             }]
         });
@@ -474,21 +472,19 @@
         });
     });
 
-    // ===== 多源对比 =====
-    // 各数据源 × 各职位 平均薪资(分组柱状图):同一职位在不同平台的薪资差异
+    // ================ 多源对比图表 =================
+    // 各数据源 × 职位 平均薪资对比(分组柱状图)
     fetchJSON('/api/salary_by_source_keyword').then(d => {
         const chart = echarts.init(document.getElementById('chart_src_kw'));
-        // 每个数据源一个系列,柱子按职位并排
         const series = d.sources.map((src, i) => ({
             name: src,
             type: 'bar',
             data: d.matrix[i],
             itemStyle: { color: COLORS[i % COLORS.length], borderRadius: [4, 4, 0, 0] },
-            label: { show: true, position: 'top', formatter: '{c}' }
+            label: { show: true, position: 'top', formatter: '{c}K' }
         }));
         chart.setOption({
-            tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' },
-                       valueFormatter: v => (v == null ? '无数据' : v + 'K') },
+            tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
             legend: { top: 0 },
             grid: { left: '8%', right: '5%', top: '15%', bottom: '10%' },
             xAxis: { type: 'category', data: d.keywords },
@@ -497,7 +493,7 @@
         });
     });
 
-    // 各数据源学历要求分布对比(分组柱状图,纵轴为占比%,消除样本量悬殊)
+    // 各数据源 学历要求结构对比(分组柱状图,占比%)
     fetchJSON('/api/education_by_source').then(d => {
         const chart = echarts.init(document.getElementById('chart_src_edu'));
         const series = d.sources.map((src, i) => ({
@@ -516,6 +512,67 @@
             yAxis: { type: 'value', name: '占比(%)' },
             series: series
         });
+    });
+
+    // ================ 薪资预测交互 =================
+    // 拉训练报告:填充下拉框 + 渲染模型对比表
+    fetchJSON('/api/model_scores').then(d => {
+        const note = document.getElementById('pf_note');
+        if (!d.trained) {
+            note.textContent = '模型尚未训练,请先运行 train_model.py。';
+            document.getElementById('pf_btn').disabled = true;
+            return;
+        }
+        // 填充下拉框
+        const fills = {
+            pf_city: d.feature_options.city,
+            pf_keyword: d.feature_options.keyword,
+            pf_education: d.feature_options.education,
+            pf_experience: d.feature_options.experience
+        };
+        for (const [id, opts] of Object.entries(fills)) {
+            const sel = document.getElementById(id);
+            (opts || []).forEach(o => {
+                const el = document.createElement('option');
+                el.value = o; el.textContent = o;
+                sel.appendChild(el);
+            });
+        }
+        // 渲染模型对比表
+        const tbody = document.querySelector('#pf_models tbody');
+        d.scores.forEach(s => {
+            const tr = document.createElement('tr');
+            if (s.model === d.best_model) tr.className = 'best';
+            tr.innerHTML = `<td>${s.model}</td><td>${s.cv_r2}</td>` +
+                           `<td>${s.test_r2}</td><td>${s.test_mae}</td>`;
+            tbody.appendChild(tr);
+        });
+        document.getElementById('pf_models').style.display = '';
+        note.textContent = `训练样本 ${d.n_samples} 条 · 最优模型:${d.best_model}` +
+            ` · R² 偏低是此类问题固有难度(列表页特征有限、薪资高方差),已如实呈现。`;
+    });
+
+    // 点预测按钮:提交表单 -> 显示预测月薪
+    document.getElementById('pf_btn').addEventListener('click', async () => {
+        const body = {
+            city: document.getElementById('pf_city').value,
+            keyword: document.getElementById('pf_keyword').value,
+            education: document.getElementById('pf_education').value,
+            experience: document.getElementById('pf_experience').value
+        };
+        const res = await fetch('/api/predict', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        const d = await res.json();
+        const box = document.getElementById('pf_result');
+        if (d.ok) {
+            box.innerHTML = `预测月薪约 <span class="val">${d.salary}</span> K` +
+                `　(${body.city} · ${body.keyword} · ${body.education} · ${body.experience})`;
+        } else {
+            box.textContent = d.msg || '预测失败';
+        }
     });
 
     // 窗口缩放时图表自适应

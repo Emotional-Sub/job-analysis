@@ -14,34 +14,18 @@ def _num_to_qian(num: float, unit: str) -> float:
     return num
 
 
-# 月薪合理上限(千元/月)。解析结果超过它的判为异常(年薪误当月薪、
-# 日薪时薪混入等),整条丢弃不计入统计,避免个别离群值把城市均值拉爆。
-SALARY_CAP_K = 200.0
-
-# 日薪换算月薪的工作日数(月均约 21.75 个工作日)
-WORKDAYS_PER_MONTH = 21.75
-
-
 def parse_salary(text: Optional[str]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     """
     把薪资文本解析成 (最低, 最高, 平均),单位统一为 千元/月。
 
-    要点:
-    1. 先识别计薪周期(年/月/日/时)。51job 里混有"20-40万/年""800元/天"
-       这类,若一律当月薪会算出几百 K 的天价,必须按周期换算:
-         - 年薪 ÷ 12  -> 月薪
-         - 日薪 × 21.75 天 -> 月薪
-         - 时薪:数据太少且噪声大,直接丢弃
-    2. 每个数字带自己的单位分别换算,正确处理"8千-1.2万"这类混合单位。
-    3. 换算后仍 > SALARY_CAP_K 的判为解析异常,整条丢弃。
+    关键点:每个数字带自己的单位分别换算,才能正确处理"8千-1.2万"这类
+    混合单位(低位是千、高位是万)的情况。
 
     支持常见格式:
         "15-25K"        -> (15, 25, 20)
         "15-25K·13薪"   -> 折算 13 薪 -> (16.25, 27.08, 21.66)
         "8千-1.2万"     -> (8, 12, 10)
         "1.5-3万"       -> (15, 30, 22.5)
-        "20-40万/年"    -> 年薪÷12 -> (16.67, 33.33, 25.0)
-        "800元/天"      -> 日薪×21.75 -> (17.4, 17.4, 17.4)
         "20K以上"       -> (20, None, 20)
         "面议"/None     -> (None, None, None)
     """
@@ -50,14 +34,7 @@ def parse_salary(text: Optional[str]) -> Tuple[Optional[float], Optional[float],
 
     t = text.strip().replace(" ", "")
 
-    # ---- 识别计薪周期 ----
-    if "时" in t or "小时" in t:
-        # 时薪噪声大、样本少,不纳入薪资统计
-        return None, None, None
-    is_yearly = "年" in t
-    is_daily = ("天" in t or "日" in t) and not is_yearly
-
-    # 提取 "·N薪" 里的薪资月数,默认 12(仅对月薪有意义)
+    # 提取 "·N薪" 里的薪资月数,默认 12
     months = 12
     m_months = re.search(r"[·xX*](\d{1,2})薪", t)
     if m_months:
@@ -81,33 +58,19 @@ def parse_salary(text: Optional[str]) -> Tuple[Optional[float], Optional[float],
 
     vals = []
     for n, u in pairs[:2]:
-        if is_daily:
-            # 日薪:数字就是"元/天",先换成千元/天,再乘工作日数得千元/月
-            vals.append(float(n) / 1000.0 * WORKDAYS_PER_MONTH)
-        else:
-            unit = u if u else trailing_unit
-            vals.append(_num_to_qian(float(n), unit))
+        unit = u if u else trailing_unit
+        vals.append(_num_to_qian(float(n), unit))
 
     if len(vals) == 1:
         lo = hi = vals[0]
     else:
         lo, hi = vals[0], vals[1]
 
-    # 年薪 -> 月薪(整年收入平摊到 12 个月)
-    if is_yearly:
-        lo /= 12.0
-        hi /= 12.0
-
-    # 按 N 薪折算回等效月薪(N薪意味着年终多发,平摊到12个月);
-    # 年薪/日薪已是等效月薪,不再叠加 N 薪系数。
-    factor = 1.0 if (is_yearly or is_daily) else months / 12.0
+    # 按 N 薪折算回等效月薪(N薪意味着年终多发,平摊到12个月)
+    factor = months / 12.0
     lo = round(lo * factor, 2)
     hi = round(hi * factor, 2)
     avg = round((lo + hi) / 2, 2)
-
-    # 换算后仍超过合理上限 -> 判为解析异常,整条丢弃
-    if avg > SALARY_CAP_K:
-        return None, None, None
 
     # "20K以上"这种只有一个数,hi 置空但 avg 用该值
     if len(vals) == 1 and ("以上" in t or "+" in t):
