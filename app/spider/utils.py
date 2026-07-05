@@ -14,18 +14,34 @@ def _num_to_qian(num: float, unit: str) -> float:
     return num
 
 
+# 月薪合理上限(千元/月)。解析结果超过它的判为异常(年薪误当月薪、
+# 日薪时薪混入等),整条丢弃不计入统计,避免个别离群值把城市均值拉爆。
+SALARY_CAP_K = 200.0
+
+# 日薪换算月薪的工作日数(月均约 21.75 个工作日)
+WORKDAYS_PER_MONTH = 21.75
+
+
 def parse_salary(text: Optional[str]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     """
     把薪资文本解析成 (最低, 最高, 平均),单位统一为 千元/月。
 
-    关键点:每个数字带自己的单位分别换算,才能正确处理"8千-1.2万"这类
-    混合单位(低位是千、高位是万)的情况。
+    要点:
+    1. 先识别计薪周期(年/月/日/时)。51job 里混有"20-40万/年""800元/天"
+       这类,若一律当月薪会算出几百 K 的天价,必须按周期换算:
+         - 年薪 ÷ 12  -> 月薪
+         - 日薪 × 21.75 天 -> 月薪
+         - 时薪:数据太少且噪声大,直接丢弃
+    2. 每个数字带自己的单位分别换算,正确处理"8千-1.2万"这类混合单位。
+    3. 换算后仍 > SALARY_CAP_K 的判为解析异常,整条丢弃。
 
     支持常见格式:
         "15-25K"        -> (15, 25, 20)
         "15-25K·13薪"   -> 折算 13 薪 -> (16.25, 27.08, 21.66)
         "8千-1.2万"     -> (8, 12, 10)
         "1.5-3万"       -> (15, 30, 22.5)
+        "20-40万/年"    -> 年薪÷12 -> (16.67, 33.33, 25.0)
+        "800元/天"      -> 日薪×21.75 -> (17.4, 17.4, 17.4)
         "20K以上"       -> (20, None, 20)
         "面议"/None     -> (None, None, None)
     """
@@ -34,7 +50,14 @@ def parse_salary(text: Optional[str]) -> Tuple[Optional[float], Optional[float],
 
     t = text.strip().replace(" ", "")
 
-    # 提取 "·N薪" 里的薪资月数,默认 12
+    # ---- 识别计薪周期 ----
+    if "时" in t or "小时" in t:
+        # 时薪噪声大、样本少,不纳入薪资统计
+        return None, None, None
+    is_yearly = "年" in t
+    is_daily = ("天" in t or "日" in t) and not is_yearly
+
+    # 提取 "·N薪" 里的薪资月数,默认 12(仅对月薪有意义)
     months = 12
     m_months = re.search(r"[·xX*](\d{1,2})薪", t)
     if m_months:
@@ -58,19 +81,33 @@ def parse_salary(text: Optional[str]) -> Tuple[Optional[float], Optional[float],
 
     vals = []
     for n, u in pairs[:2]:
-        unit = u if u else trailing_unit
-        vals.append(_num_to_qian(float(n), unit))
+        if is_daily:
+            # 日薪:数字就是"元/天",先换成千元/天,再乘工作日数得千元/月
+            vals.append(float(n) / 1000.0 * WORKDAYS_PER_MONTH)
+        else:
+            unit = u if u else trailing_unit
+            vals.append(_num_to_qian(float(n), unit))
 
     if len(vals) == 1:
         lo = hi = vals[0]
     else:
         lo, hi = vals[0], vals[1]
 
-    # 按 N 薪折算回等效月薪(N薪意味着年终多发,平摊到12个月)
-    factor = months / 12.0
+    # 年薪 -> 月薪(整年收入平摊到 12 个月)
+    if is_yearly:
+        lo /= 12.0
+        hi /= 12.0
+
+    # 按 N 薪折算回等效月薪(N薪意味着年终多发,平摊到12个月);
+    # 年薪/日薪已是等效月薪,不再叠加 N 薪系数。
+    factor = 1.0 if (is_yearly or is_daily) else months / 12.0
     lo = round(lo * factor, 2)
     hi = round(hi * factor, 2)
     avg = round((lo + hi) / 2, 2)
+
+    # 换算后仍超过合理上限 -> 判为解析异常,整条丢弃
+    if avg > SALARY_CAP_K:
+        return None, None, None
 
     # "20K以上"这种只有一个数,hi 置空但 avg 用该值
     if len(vals) == 1 and ("以上" in t or "+" in t):
@@ -129,6 +166,68 @@ def split_tags(text: Optional[str]) -> str:
     parts = re.split(r"[,，、\s;；/|]+", text.strip())
     parts = [p.strip() for p in parts if p.strip()]
     return ",".join(parts)
+
+
+# 技能词库:规范名 -> 该技能的所有别名/写法(小写)。
+# 从岗位标题里按别名匹配,命中后统一记为规范名,避免 "js"/"JS"/"JavaScript" 被算成三个。
+# 论文里这属于"基于词典的关键词抽取",简单可靠、结果可解释。
+SKILL_DICT = {
+    "Python": ["python"],
+    "Java": ["java"],
+    "C++": ["c++"],
+    "C#": ["c#", ".net", "asp.net"],
+    "Go": ["golang", "go语言"],
+    "PHP": ["php"],
+    "JavaScript": ["javascript", "js", "es6"],
+    "TypeScript": ["typescript", "ts"],
+    "Vue": ["vue"],
+    "React": ["react"],
+    "Angular": ["angular"],
+    "HTML/CSS": ["html", "css", "h5"],
+    "Node.js": ["node.js", "nodejs", "node"],
+    "Spring": ["spring", "springboot", "spring boot", "springcloud"],
+    "MySQL": ["mysql"],
+    "Redis": ["redis"],
+    "MongoDB": ["mongodb", "mongo"],
+    "Oracle": ["oracle"],
+    "SQL": ["sql"],
+    "Linux": ["linux"],
+    "Docker": ["docker"],
+    "Kubernetes": ["kubernetes", "k8s"],
+    "分布式": ["分布式"],
+    "微服务": ["微服务"],
+    "大数据": ["大数据", "hadoop", "spark", "hive", "flink"],
+    "机器学习": ["机器学习", "machine learning", "ml"],
+    "深度学习": ["深度学习", "deep learning", "dl", "pytorch", "tensorflow"],
+    "算法": ["算法"],
+    "爬虫": ["爬虫", "spider", "scrapy"],
+    "数据分析": ["数据分析", "数据挖掘"],
+    "测试": ["测试", "自动化测试", "qa"],
+    "运维": ["运维", "devops"],
+    "前端": ["前端"],
+    "后端": ["后端", "服务端"],
+    "全栈": ["全栈"],
+    "Android": ["android", "安卓"],
+    "iOS": ["ios"],
+}
+
+
+def extract_skills(*texts: Optional[str]) -> str:
+    """
+    从一段或多段文本(通常是岗位标题)里抽取技能关键词,
+    返回逗号分隔的规范技能名字符串(去重、保持词库顺序)。
+
+    例:extract_skills("Python后端开发工程师") -> "Python,后端"
+        extract_skills("高级Java(Spring) 工程师") -> "Java,Spring"
+    """
+    blob = " ".join(t for t in texts if t).lower()
+    if not blob:
+        return ""
+    found = []
+    for norm, aliases in SKILL_DICT.items():
+        if any(alias in blob for alias in aliases):
+            found.append(norm)
+    return ",".join(found)
 
 
 if __name__ == "__main__":

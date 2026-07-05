@@ -73,6 +73,75 @@
         /* 技能图有 20 条,需要更高的画布,否则底部条目和 X 轴被挤掉 */
         .chart-tall { height: 560px; }
 
+        /* 薪资预测卡片 */
+        .predict-box {
+            background: #fff;
+            border-radius: 10px;
+            padding: 24px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+            margin-bottom: 24px;
+        }
+        .predict-box h3 {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 16px;
+            padding-left: 10px;
+            border-left: 4px solid #2a5298;
+        }
+        .predict-form {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            align-items: flex-end;
+        }
+        .predict-field { display: flex; flex-direction: column; gap: 4px; }
+        .predict-field label { font-size: 13px; color: #888; }
+        .predict-field select {
+            padding: 8px 10px;
+            border: 1px solid #dcdfe6;
+            border-radius: 6px;
+            font-size: 14px;
+            min-width: 120px;
+            background: #fff;
+        }
+        .predict-btn {
+            padding: 9px 24px;
+            background: #2a5298;
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+        .predict-btn:hover { background: #1e3c72; }
+        .predict-result {
+            margin-top: 16px;
+            font-size: 15px;
+            color: #333;
+        }
+        .predict-result .val {
+            font-size: 28px;
+            font-weight: 700;
+            color: #e8684a;
+            margin: 0 6px;
+        }
+        /* 模型对比表 */
+        .model-table {
+            margin-top: 16px;
+            border-collapse: collapse;
+            width: 100%;
+            max-width: 520px;
+            font-size: 13px;
+        }
+        .model-table th, .model-table td {
+            border: 1px solid #eee;
+            padding: 8px 12px;
+            text-align: center;
+        }
+        .model-table th { background: #f5f7fa; color: #555; }
+        .model-table tr.best td { background: #eef4ff; font-weight: 600; }
+        .model-note { font-size: 12px; color: #aaa; margin-top: 8px; }
+
         .footer {
             text-align: center;
             padding: 24px;
@@ -108,6 +177,38 @@
             </div>
         </div>
 
+        <!-- 薪资预测:交互式,选条件 -> 实时预测月薪 -->
+        <div class="predict-box">
+            <h3>薪资预测(机器学习)</h3>
+            <div class="predict-form">
+                <div class="predict-field">
+                    <label>城市</label>
+                    <select id="pf_city"></select>
+                </div>
+                <div class="predict-field">
+                    <label>职位</label>
+                    <select id="pf_keyword"></select>
+                </div>
+                <div class="predict-field">
+                    <label>学历</label>
+                    <select id="pf_education"></select>
+                </div>
+                <div class="predict-field">
+                    <label>经验</label>
+                    <select id="pf_experience"></select>
+                </div>
+                <button class="predict-btn" id="pf_btn">预测月薪</button>
+            </div>
+            <div class="predict-result" id="pf_result"></div>
+            <table class="model-table" id="pf_models" style="display:none">
+                <thead>
+                    <tr><th>模型</th><th>交叉验证 R²</th><th>测试集 R²</th><th>MAE(K)</th></tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+            <div class="model-note" id="pf_note"></div>
+        </div>
+
         <!-- 图表区 -->
         <div class="charts">
             <!-- 第一行:城市维度两张对称 -->
@@ -118,6 +219,11 @@
             <div class="chart-box">
                 <h3>各城市薪资中位数 Top 10</h3>
                 <div id="chart_salary_city" class="chart"></div>
+            </div>
+            <!-- 地图:全国岗位分布(点大小=岗位数,颜色=薪资) -->
+            <div class="chart-box full-width">
+                <h3>全国岗位地理分布(点大小=岗位数,颜色=薪资中位数)</h3>
+                <div id="chart_map" class="chart chart-tall"></div>
             </div>
             <!-- 第二行:学历/经验两个饼图对称 -->
             <div class="chart-box">
@@ -136,6 +242,15 @@
             <div class="chart-box">
                 <h3>各职位平均薪资</h3>
                 <div id="chart_salary_kw" class="chart"></div>
+            </div>
+            <!-- 多源对比区:接入猎聘后,横向对比不同平台的差异 -->
+            <div class="chart-box">
+                <h3>各数据源 × 职位 平均薪资对比</h3>
+                <div id="chart_src_kw" class="chart"></div>
+            </div>
+            <div class="chart-box">
+                <h3>各数据源 学历要求结构对比(占比%)</h3>
+                <div id="chart_src_edu" class="chart"></div>
             </div>
             <!-- 第三、四行:两张技能横向长图,整行、样式一致 -->
             <div class="chart-box full-width">
@@ -211,6 +326,63 @@
                 data: d.salaries,
                 itemStyle: { color: '#f6bd16', borderRadius: [4, 4, 0, 0] },
                 label: { show: true, position: 'top', formatter: '{c}K' }
+            }]
+        });
+    });
+
+    // 城市岗位分布地图:中国轮廓做底图,城市散点(大小=岗位数,颜色=薪资)。
+    // 先加载本地 china.json 注册地图,再画散点,全程离线不依赖 CDN。
+    fetchJSON('/static/maps/china.json').then(geoJson => {
+        echarts.registerMap('china', geoJson);
+        return fetchJSON('/api/city_geo');
+    }).then(d => {
+        const chart = echarts.init(document.getElementById('chart_map'));
+        // 散点大小按岗位数缩放:开方后乘系数,避免大城市点过大盖住小城市
+        const maxCnt = Math.max(...d.map(i => i.value[2]), 1);
+        // 薪资范围供 visualMap 上色(过滤掉 salary 为 null 的)
+        const sals = d.map(i => i.salary).filter(v => v != null);
+        const minSal = sals.length ? Math.min(...sals) : 0;
+        const maxSal = sals.length ? Math.max(...sals) : 1;
+        chart.setOption({
+            tooltip: {
+                trigger: 'item',
+                formatter: p => {
+                    if (!p.data) return p.name;
+                    const v = p.data.value;
+                    const sal = p.data.salary != null ? p.data.salary + 'K' : '无数据';
+                    return `${p.data.name}<br/>岗位数: ${v[2]}<br/>薪资中位数: ${sal}`;
+                }
+            },
+            visualMap: {
+                min: minSal, max: maxSal,
+                left: 'left', bottom: '5%',
+                text: ['高薪', '低薪'],
+                dimension: 3,          // 用 value 之外的 salary 维度上色(见 series 里的 encode)
+                calculable: true,
+                inRange: { color: ['#5b8ff9', '#f6bd16', '#e8684a'] },
+                textStyle: { color: '#666' }
+            },
+            geo: {
+                map: 'china',
+                roam: true,            // 允许缩放/拖动
+                itemStyle: { areaColor: '#f3f5f9', borderColor: '#c8d1dc' },
+                emphasis: { itemStyle: { areaColor: '#e6ebf2' }, label: { show: false } }
+            },
+            series: [{
+                type: 'scatter',
+                coordinateSystem: 'geo',
+                // 每个点带 salary,visualMap 的 dimension:3 会读它上色
+                data: d.map(i => ({
+                    name: i.name,
+                    value: [i.value[0], i.value[1], i.value[2], i.salary],
+                    salary: i.salary
+                })),
+                symbolSize: val => 10 + 40 * Math.sqrt(val[2] / maxCnt),
+                label: {
+                    show: true, position: 'right',
+                    formatter: p => p.data.name, fontSize: 11, color: '#333'
+                },
+                itemStyle: { opacity: 0.85 }
             }]
         });
     });
@@ -299,6 +471,50 @@
                 itemStyle: { color: '#9270ca', borderRadius: [4, 4, 0, 0] },
                 label: { show: true, position: 'top', formatter: '{c}K' }
             }]
+        });
+    });
+
+    // ===== 多源对比 =====
+    // 各数据源 × 各职位 平均薪资(分组柱状图):同一职位在不同平台的薪资差异
+    fetchJSON('/api/salary_by_source_keyword').then(d => {
+        const chart = echarts.init(document.getElementById('chart_src_kw'));
+        // 每个数据源一个系列,柱子按职位并排
+        const series = d.sources.map((src, i) => ({
+            name: src,
+            type: 'bar',
+            data: d.matrix[i],
+            itemStyle: { color: COLORS[i % COLORS.length], borderRadius: [4, 4, 0, 0] },
+            label: { show: true, position: 'top', formatter: '{c}' }
+        }));
+        chart.setOption({
+            tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' },
+                       valueFormatter: v => (v == null ? '无数据' : v + 'K') },
+            legend: { top: 0 },
+            grid: { left: '8%', right: '5%', top: '15%', bottom: '10%' },
+            xAxis: { type: 'category', data: d.keywords },
+            yAxis: { type: 'value', name: '月薪(K)' },
+            series: series
+        });
+    });
+
+    // 各数据源学历要求分布对比(分组柱状图,纵轴为占比%,消除样本量悬殊)
+    fetchJSON('/api/education_by_source').then(d => {
+        const chart = echarts.init(document.getElementById('chart_src_edu'));
+        const series = d.sources.map((src, i) => ({
+            name: src,
+            type: 'bar',
+            data: d.matrix[i],
+            itemStyle: { color: COLORS[i % COLORS.length], borderRadius: [4, 4, 0, 0] },
+            label: { show: true, position: 'top', formatter: '{c}%' }
+        }));
+        chart.setOption({
+            tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' },
+                       valueFormatter: v => (v == null ? '0%' : v + '%') },
+            legend: { top: 0 },
+            grid: { left: '8%', right: '5%', top: '15%', bottom: '10%' },
+            xAxis: { type: 'category', data: d.educations },
+            yAxis: { type: 'value', name: '占比(%)' },
+            series: series
         });
     });
 

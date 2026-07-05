@@ -9,9 +9,10 @@ Flask 应用:招聘数据可视化网站。
   venv/Scripts/python.exe run_web.py
 然后浏览器打开 http://localhost:5000
 """
-from flask import Flask, render_template, jsonify
+from flask import Flask, render_template, jsonify, request
 
 from app.web import stats
+from app.ml import predict as ml_predict
 
 
 def create_app() -> Flask:
@@ -60,5 +61,47 @@ def create_app() -> Flask:
     @app.route("/api/jobs_by_source")
     def api_jobs_by_source():
         return jsonify(stats.jobs_by_source())
+
+    # ---------------- 多源对比接口 ----------------
+    @app.route("/api/salary_by_source")
+    def api_salary_by_source():
+        return jsonify(stats.salary_by_source())
+
+    @app.route("/api/education_by_source")
+    def api_education_by_source():
+        return jsonify(stats.education_by_source())
+
+    @app.route("/api/salary_by_source_keyword")
+    def api_salary_by_source_keyword():
+        return jsonify(stats.salary_by_source_keyword())
+
+    # ---------------- 地图接口 ----------------
+    @app.route("/api/city_geo")
+    def api_city_geo():
+        return jsonify(stats.city_geo_stats())
+
+    # ---------------- 薪资预测接口 ----------------
+    @app.route("/api/model_scores")
+    def api_model_scores():
+        """返回训练报告:三模型评分对比 + 各特征可选值(填充前端下拉框)。
+        未训练时返回 trained=False,前端据此提示先跑 train_model.py。"""
+        report = ml_predict.get_report()
+        if not report:
+            return jsonify({"trained": False})
+        return jsonify({"trained": True, **report})
+
+    @app.route("/api/predict", methods=["POST"])
+    def api_predict():
+        """接收 {city, education, experience, keyword},返回预测月薪(千元)。"""
+        data = request.get_json(silent=True) or {}
+        pred = ml_predict.predict(
+            city=data.get("city"),
+            education=data.get("education"),
+            experience=data.get("experience"),
+            keyword=data.get("keyword"),
+        )
+        if pred is None:
+            return jsonify({"ok": False, "msg": "模型未训练,请先运行 train_model.py"})
+        return jsonify({"ok": True, "salary": pred})
 
     return app

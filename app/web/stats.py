@@ -269,3 +269,229 @@ def jobs_by_source() -> List[Dict]:
         return [{"name": r.source, "value": int(r.cnt)} for r in rows]
     finally:
         session.close()
+
+
+# ==================== 多源对比分析 ====================
+# 下面三个函数把「数据源」作为分组维度,横向对比不同招聘平台的差异。
+# 这是接入猎聘后真正体现「多源采集」价值的地方 —— 不只是把两家数据堆一起,
+# 而是能看出同一职位在不同平台的薪资/学历口径差异。
+
+
+def salary_by_source() -> Dict:
+    """
+    各数据源的薪资中位数对比,用于柱状图。
+
+    用中位数而非均值(与城市图口径一致,抗高薪离群值)。同时返回每个源的
+    样本数,前端标注出来 —— 样本量差得多时(如猎聘刚接入、量少),
+    对比要谨慎解读,如实呈现比藏着好。
+    """
+    session = get_session()
+    try:
+        rows = (
+            session.query(Job.source, Job.salary_avg)
+            .filter(Job.salary_avg.isnot(None), Job.source.isnot(None))
+            .all()
+        )
+        bucket: Dict[str, List[float]] = defaultdict(list)
+        for source, sal in rows:
+            bucket[source].append(float(sal))
+
+        # 按中位数降序
+        items = [
+            (src, round(median(sals), 1), len(sals))
+            for src, sals in bucket.items()
+        ]
+        items.sort(key=lambda x: x[1], reverse=True)
+        return {
+            "sources": [s for s, _, _ in items],
+            "salaries": [sal for _, sal, _ in items],
+            "counts": [c for _, _, c in items],
+        }
+    finally:
+        session.close()
+
+
+def education_by_source() -> Dict:
+    """
+    各数据源的学历要求分布对比(分组),用于分组柱状图 / 堆叠图。
+
+    返回:
+        {
+          "sources": ["51job", "liepin"],       # 数据源(系列)
+          "educations": ["本科", "大专", ...],    # 学历档(x 轴类目)
+          "matrix": [[...], [...]]               # matrix[i][j] = 源 i 在学历 j 的岗位数
+        }
+    做成「占比」而非绝对数,消除两个源样本量悬殊的影响,更能看出学历要求结构差异。
+    """
+    session = get_session()
+    try:
+        rows = (
+            session.query(
+                Job.source,
+                Job.education,
+                func.count(Job.id).label("cnt"),
+            )
+            .filter(Job.source.isnot(None), Job.education.isnot(None))
+            .group_by(Job.source, Job.education)
+            .all()
+        )
+        # 源 -> {学历: 数量}
+        by_source: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        edu_set = set()
+        for source, edu, cnt in rows:
+            by_source[source][edu] = int(cnt)
+            edu_set.add(edu)
+
+        # 学历档按固定顺序排列(高到低),没出现的档也占位,让对比整齐
+        edu_order = ["博士", "硕士", "本科", "大专", "高中及以下", "不限"]
+        educations = [e for e in edu_order if e in edu_set]
+        # 兜底:词库外的学历档追加到末尾
+        educations += [e for e in edu_set if e not in edu_order]
+
+        sources = list(by_source.keys())
+        matrix = []
+        for src in sources:
+            total = sum(by_source[src].values()) or 1
+            # 转成百分比(保留 1 位),消除样本量差异
+            row = [round(by_source[src].get(e, 0) / total * 100, 1) for e in educations]
+            matrix.append(row)
+
+        return {
+            "sources": sources,
+            "educations": educations,
+            "matrix": matrix,
+        }
+    finally:
+        session.close()
+
+
+def salary_by_source_keyword() -> Dict:
+    """
+    各数据源 × 各职位 的平均薪资对比,用于分组柱状图。
+
+    这是多源对比里最直观的一张:同一个职位(如 Python),51job 和猎聘
+    给出的平均薪资分别是多少,并排柱子一眼看出平台差异。
+
+    返回:
+        {
+          "keywords": ["Python", "Java", ...],   # x 轴类目(职位)
+          "sources":  ["51job", "liepin"],        # 系列(数据源)
+          "matrix":   [[...], [...]]              # matrix[i][j] = 源 i 在职位 j 的平均薪资
+        }
+    """
+    session = get_session()
+    try:
+        rows = (
+            session.query(
+                Job.source,
+                Job.keyword,
+                func.avg(Job.salary_avg).label("avg_sal"),
+            )
+            .filter(
+                Job.salary_avg.isnot(None),
+                Job.source.isnot(None),
+                Job.keyword.isnot(None),
+            )
+            .group_by(Job.source, Job.keyword)
+            .all()
+        )
+        # 源 -> {职位: 平均薪资}
+        by_source: Dict[str, Dict[str, float]] = defaultdict(dict)
+        kw_set = set()
+        for source, kw, avg_sal in rows:
+            by_source[source][kw] = round(float(avg_sal), 1)
+            kw_set.add(kw)
+
+        # 职位按 config 里的关键词顺序排,保证两张图 x 轴一致
+        kw_order = [k.strip() for k in config.KEYWORDS]
+        keywords = [k for k in kw_order if k in kw_set]
+        keywords += [k for k in kw_set if k not in kw_order]
+
+        sources = list(by_source.keys())
+        matrix = []
+        for src in sources:
+            # 某源在某职位没有数据时给 None,ECharts 会自动断开该柱
+            row = [by_source[src].get(k) for k in keywords]
+            matrix.append(row)
+
+        return {
+            "keywords": keywords,
+            "sources": sources,
+            "matrix": matrix,
+        }
+    finally:
+        session.close()
+
+
+# ==================== 地图可视化 ====================
+# 城市经纬度表:ECharts 地图散点靠 [经度, 纬度] 定位。
+# 省级地图 GeoJSON 里没有地级市(如苏州/无锡),所以不靠地名匹配,
+# 直接用经纬度打点,最稳、不受 GeoJSON 城市名有无影响。
+CITY_COORDS = {
+    "北京": [116.41, 39.90],
+    "上海": [121.47, 31.23],
+    "广州": [113.26, 23.13],
+    "深圳": [114.06, 22.55],
+    "重庆": [106.55, 29.56],
+    "天津": [117.20, 39.13],
+    "杭州": [120.15, 30.28],
+    "宁波": [121.55, 29.88],
+    "成都": [104.07, 30.57],
+    "南京": [118.80, 32.06],
+    "苏州": [120.62, 31.32],
+    "无锡": [120.30, 31.57],
+    "武汉": [114.31, 30.52],
+    "长沙": [112.94, 28.23],
+    "郑州": [113.63, 34.75],
+    "西安": [108.95, 34.27],
+    "青岛": [120.38, 36.07],
+    "济南": [117.00, 36.65],
+    "福州": [119.30, 26.08],
+    "合肥": [117.28, 31.86],
+}
+
+
+def city_geo_stats(min_samples: int = 5) -> List[Dict]:
+    """
+    地图散点数据:每个目标城市的岗位数 + 薪资中位数 + 经纬度。
+
+    返回 [{name, value: [经度, 纬度, 岗位数], salary}, ...]。
+    ECharts 的 scatter series 用 value 前两位定位、第三位控制点大小(岗位数),
+    salary 供 visualMap 上色和 tooltip 展示。
+
+    只保留有经纬度且样本数 >= min_samples 的城市。
+    """
+    session = get_session()
+    try:
+        rows = (
+            session.query(Job.city, Job.salary_avg)
+            .filter(Job.city.isnot(None))
+            .all()
+        )
+        # 城市 -> [薪资, ...](薪资可能为 None,单独计数)
+        counts: Dict[str, int] = defaultdict(int)
+        salaries: Dict[str, List[float]] = defaultdict(list)
+        for city, sal in rows:
+            if city not in CITY_COORDS:
+                continue
+            counts[city] += 1
+            if sal is not None:
+                salaries[city].append(float(sal))
+
+        result = []
+        for city, cnt in counts.items():
+            if cnt < min_samples:
+                continue
+            lon, lat = CITY_COORDS[city]
+            sal_list = salaries[city]
+            med = round(median(sal_list), 1) if sal_list else None
+            result.append({
+                "name": city,
+                "value": [lon, lat, cnt],
+                "salary": med,
+            })
+        # 按岗位数降序(不影响绘制,方便调试查看)
+        result.sort(key=lambda x: x["value"][2], reverse=True)
+        return result
+    finally:
+        session.close()

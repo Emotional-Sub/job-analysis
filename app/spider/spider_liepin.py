@@ -114,37 +114,61 @@ def _extract_job_id(url: str) -> str:
 _SALARY_RE = re.compile(r"\d+\s*[-~]\s*\d+\s*[kK万]|面议|\d+\s*元|\d+\s*万")
 
 # 学历关键词:命中即判为学历标签
-_EDU_KWS = ("本科", "大专", "硕士", "博士", "学历", "高中", "中专", "初中")
+_EDU_KWS = ("本科", "大专", "硕士", "博士", "学历", "高中", "中专", "初中", "MBA", "EMBA")
+
+# 经验标签特征:猎聘的经验档形如 "1-3年""3-5年""5-10年""10年以上""1年以下"
+# "经验不限""应届""在校/应届"。之前只认含"年/应届/经验"的,漏掉了"在校""不限经验"
+# 等写法,导致近半数经验字段为 None。这里放宽匹配。
+_EXP_KWS = ("年", "应届", "经验", "在校", "不限", "往届")
 
 
 def _classify_labels(spans_text: List[str]) -> Dict[str, str]:
     """
-    从卡片里所有 span 的文本中,按内容特征认出 薪资 / 城市 / 经验 / 学历。
+    从卡片里所有 span 的文本中,按内容特征认出 薪资 / 经验 / 学历。
 
     猎聘现在用构建时随机生成的混淆 class(如 _40108E8PWS),发版就变,不能依赖。
     但字段的文本格式是稳定的,所以改用"文本特征"来识别 —— 这样即便 class 再变,
     只要展示格式不变就还能抓到。
+
+    识别顺序有讲究:先认学历(词表最明确),再认薪资,最后经验用最宽的兜底。
+    这样"统招本科"不会被经验的"不限"之类误伤,经验也不会因为写法特殊而漏掉。
     """
     result: Dict[str, str] = {}
     for t in spans_text:
         t = t.strip()
         if not t or t in ("·", "|", "-"):
             continue
-        # 薪资:第一个命中薪资模式的
-        if "salary" not in result and _SALARY_RE.search(t):
-            result["salary"] = t
-            continue
-        # 学历
+        # 学历:词表最明确,优先判
         if "edu" not in result and any(k in t for k in _EDU_KWS):
             result["edu"] = t
             continue
-        # 经验:含"年"/"应届"/"经验"(且不是学历)
-        if "exp" not in result and (
-            "年" in t or "应届" in t or "经验" in t
-        ):
+        # 薪资
+        if "salary" not in result and _SALARY_RE.search(t):
+            result["salary"] = t
+            continue
+        # 经验:放宽后的关键词兜底(且已排除学历/薪资)
+        if "exp" not in result and any(k in t for k in _EXP_KWS):
             result["exp"] = t
             continue
     return result
+
+
+# 实习岗标题特征:命中即视为实习岗,过滤掉(薪资多为日薪/低月薪,会拉低统计)
+_INTERN_KWS = ("实习", "见习", "兼职", "日结", "临时工")
+
+
+def _is_intern(title: str, url: str) -> bool:
+    """
+    判断是否实习/兼职岗。两个信号:
+      1. 标题含"实习/见习/兼职"等词
+      2. 详情链接走的是猎聘直招频道 /lptjob/(实习/低端岗聚集在此)
+    命中任一即过滤 —— 我们分析的是正式技术岗薪资,实习岗会严重拉低中位数。
+    """
+    if title and any(k in title for k in _INTERN_KWS):
+        return True
+    if url and "/lptjob/" in url:
+        return True
+    return False
 
 
 def _extract_cards(page) -> List[Dict]:
@@ -182,6 +206,13 @@ def _extract_cards(page) -> List[Dict]:
         if not title:
             continue
 
+        # 详情链接:岗位块 a 的 href(提前取,用于实习岗判断和去重)
+        detail_url = job.get_attribute("href")
+
+        # 过滤实习/兼职岗:薪资多为日薪/低月薪,会严重拉低正式岗薪资统计
+        if _is_intern(title, detail_url or ""):
+            continue
+
         # 城市:岗位块内的 span.ellipsis-1(标题是 div,城市是 span,天然区分)
         city_el = job.query_selector("span.ellipsis-1")
         dq_full = city_el.inner_text().strip() if city_el else None
@@ -209,9 +240,6 @@ def _extract_cards(page) -> List[Dict]:
             if comp_divs:
                 first_span = comp_divs[-1].query_selector("span")
                 industry = first_span.inner_text().strip() if first_span else None
-
-        # 详情链接:岗位块 a 的 href
-        detail_url = job.get_attribute("href")
 
         # 技能从标题里按词库抽取(列表页无独立技能字段)
         skills = extract_skills(title)
@@ -268,6 +296,9 @@ def run_real() -> None:
             context.storage_state(path=LIEPIN_STORAGE_STATE)
             print(f"[liepin] 登录状态已保存到 {LIEPIN_STORAGE_STATE}")
 
+        # 连续多少页抓到 0 条就判定当前城市被拦/无更多结果,提前跳到下一组
+        EMPTY_PAGE_LIMIT = 2
+
         # 城市 × 关键词 双层循环
         for city_name in config.CITIES:
             city_name = city_name.strip()
@@ -275,20 +306,41 @@ def run_real() -> None:
             for kw in config.KEYWORDS:
                 kw = kw.strip()
                 print(f"[liepin] 城市:{city_name}  关键词:{kw}")
+                empty_streak = 0
                 for pg in range(0, config.MAX_PAGES):
                     # 猎聘搜索:key=关键词,dq=城市码,curPage 从 0 开始
                     url = f"https://www.liepin.com/zhaopin/?key={kw}&curPage={pg}"
                     if dq_code:
                         url += f"&dq={dq_code}"
-                    page.goto(url, timeout=60000)
-                    # 等岗位卡片渲染(动态加载),最多等 15 秒
+
+                    # goto 容错:被反爬掐断连接(ERR_ABORTED)等会抛异常,
+                    # 单页失败不该让整个任务崩溃 —— 记一次空页,继续下一页
+                    try:
+                        page.goto(url, timeout=60000)
+                    except Exception as e:
+                        print(f"    第 {pg + 1} 页:打开失败({type(e).__name__}),跳过")
+                        empty_streak += 1
+                        if empty_streak >= EMPTY_PAGE_LIMIT:
+                            print(f"    连续 {empty_streak} 页异常,疑似被拦,跳过该组")
+                            break
+                        time.sleep(config.REQUEST_DELAY)
+                        continue
+
+                    # 等岗位卡片渲染(动态加载),最多等 15 秒。
+                    # 等不到就 continue,绝不往下抓 —— 否则抓到的是上一页的残留数据。
                     try:
                         page.wait_for_selector(
-                            ".job-card-pc-container, div[class*='job-card']",
-                            timeout=15000,
+                            ".job-card-pc-container", timeout=15000
                         )
                     except Exception:
                         print(f"    第 {pg + 1} 页:等不到岗位卡片,可能被反爬拦截或没有结果")
+                        empty_streak += 1
+                        if empty_streak >= EMPTY_PAGE_LIMIT:
+                            print(f"    连续 {empty_streak} 页无结果,跳过该组")
+                            break
+                        time.sleep(config.REQUEST_DELAY)
+                        continue
+
                     page.wait_for_timeout(int(config.REQUEST_DELAY * 1000))
 
                     cards = _extract_cards(page)
@@ -297,12 +349,27 @@ def run_real() -> None:
                         c["source"] = "liepin"
                         if not c.get("city"):
                             c["city"] = city_name
+
                     if cards:
+                        empty_streak = 0
                         total += clean_and_save(cards)
+                    else:
+                        # 页面出来了但一条没抓到(可能全被实习岗过滤,或结构变了)
+                        empty_streak += 1
                     print(f"    第 {pg + 1} 页,抓到 {len(cards)} 条")
+
+                    if empty_streak >= EMPTY_PAGE_LIMIT:
+                        print(f"    连续 {empty_streak} 页 0 条,跳过该组")
+                        break
+
                     time.sleep(config.REQUEST_DELAY)
 
-        context.storage_state(path=LIEPIN_STORAGE_STATE)
+                # 每组抓完存一次登录态,中途崩了也不丢已保存的 cookie
+                try:
+                    context.storage_state(path=LIEPIN_STORAGE_STATE)
+                except Exception:
+                    pass
+
         browser.close()
 
     print(f"[liepin] 完成,累计新增 {total} 条。")
