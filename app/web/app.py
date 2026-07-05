@@ -53,4 +53,12 @@ def create_app() -> Flask:
     def api_skills():
         return jsonify(stats.top_skills())
 
+    @app.route("/api/salary_by_skill")
+    def api_salary_by_skill():
+        return jsonify(stats.salary_by_skill())
+
+    @app.route("/api/jobs_by_source")
+    def api_jobs_by_source():
+        return jsonify(stats.jobs_by_source())
+
     return app

@@ -13,20 +13,14 @@
 注意:招聘站反爬较强、页面结构会变。real 模式的选择器(selector)可能需要
 你打开页面用开发者工具核对后微调。这是爬虫项目的常态,不是 bug。
 """
-import hashlib
 import json
 import time
 from typing import List, Dict
 
 from app import config
-from app.db.session import init_db, get_session
-from app.db.models import Job
-from app.spider.utils import (
-    parse_salary,
-    clean_education,
-    clean_experience,
-    split_tags,
-)
+from app.db.session import init_db
+from app.spider.pipeline import clean_and_save
+from app.spider.utils import extract_skills
 
 
 # ---------------- 样例数据(demo 模式用) ----------------
@@ -94,67 +88,6 @@ SAMPLE_RAW: List[Dict] = [
 ]
 
 
-def _make_job_key(raw: Dict) -> str:
-    """
-    生成站点内岗位唯一标识,用于去重。
-    优先用站点官方岗位 id(sensorsdata 里的 jobId),最稳定;
-    没有就退而用详情页 url;再没有就用 标题+公司+城市 拼哈希。
-    """
-    if raw.get("job_key"):
-        return str(raw["job_key"])
-    url = raw.get("url")
-    if url:
-        return url
-    base = f"{raw.get('title')}|{raw.get('company')}|{raw.get('city')}"
-    return "h" + hashlib.md5(base.encode("utf-8")).hexdigest()
-
-
-def clean_and_save(raw_list: List[Dict]) -> int:
-    """把原始卡片列表清洗后写入数据库,返回新增条数。"""
-    session = get_session()
-    inserted = 0
-    try:
-        for raw in raw_list:
-            source = raw.get("source", "51job")
-            job_key = _make_job_key(raw)
-
-            # 用 (source, job_key) 去重:同一个岗位只存一次
-            exists = (
-                session.query(Job)
-                .filter_by(source=source, job_key=job_key)
-                .first()
-            )
-            if exists:
-                continue
-
-            lo, hi, avg = parse_salary(raw.get("salary_text"))
-            job = Job(
-                source=source,
-                job_key=job_key,
-                title=raw.get("title"),
-                company=raw.get("company"),
-                city=raw.get("city"),
-                industry=raw.get("industry"),
-                salary_text=raw.get("salary_text"),
-                salary_min=lo,
-                salary_max=hi,
-                salary_avg=avg,
-                education=clean_education(raw.get("education_text")),
-                experience=clean_experience(raw.get("experience_text")),
-                tags=split_tags(raw.get("tags_text")),
-                keyword=raw.get("keyword"),
-            )
-            session.add(job)
-            inserted += 1
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
-    return inserted
-
-
 def run_demo() -> None:
     """demo 模式:用样例数据跑通整条管道,验证环境和数据库。"""
     print("[demo] 初始化数据库表...")
@@ -206,18 +139,24 @@ def _extract_cards(page) -> List[Dict]:
             return el.get_attribute(attr) if el else None
 
         company = _txt(".cname") or _attr(".cname", "title")
-        industry = _txt(".bc .dc:first-child") or _attr(".bc .dc:first-child", "title")
+        # 行业在 .bc 下的第一个 .dc(后面还有企业性质、规模等 .dc)
+        industry = _attr(".bc .dc", "title") or _txt(".bc .dc")
         detail_url = _attr("a.comp", "href")
+
+        # 技能从岗位标题里提取(51job 列表页没有独立的技能标签字段)
+        # extract_skills 已返回逗号分隔字符串,直接用,不要再 join(会把字符串拆成单字符)
+        title = data.get("jobTitle")
+        skills = extract_skills(title)
 
         cards.append({
             "job_key": data.get("jobId"),          # 用官方 jobId 去重,最稳
-            "title": data.get("jobTitle"),
+            "title": title,
             "salary_text": data.get("jobSalary"),
             "city": city,
             "area": area_full,
             "education_text": data.get("jobDegree"),
             "experience_text": data.get("jobYear"),
-            "tags_text": None,                      # 福利标签意义不大,先不抓
+            "tags_text": skills if skills else None,
             "company": company,
             "industry": industry,
             "url": detail_url,
@@ -259,30 +198,41 @@ def run_real() -> None:
             context.storage_state(path=config.STORAGE_STATE)
             print(f"[real] 登录状态已保存到 {config.STORAGE_STATE}")
 
-        for kw in config.KEYWORDS:
-            kw = kw.strip()
-            print(f"[real] 搜索关键词: {kw}")
-            for pg in range(1, config.MAX_PAGES + 1):
-                url = (
-                    f"https://we.51job.com/pc/search?keyword={kw}"
-                    f"&searchType=2&pageNum={pg}"
-                )
-                page.goto(url, timeout=60000)
-                # 等岗位卡片真正渲染出来(动态加载),最多等 15 秒
-                try:
-                    page.wait_for_selector(".joblist-item", timeout=15000)
-                except Exception:
-                    print(f"  第 {pg} 页:等不到岗位卡片,可能被反爬拦截或没有结果")
-                page.wait_for_timeout(int(config.REQUEST_DELAY * 1000))
+        # 双层循环:城市 × 关键词。这样每个城市都能抓到足够样本,
+        # "各城市"相关图表才有横向对比价值(不再是成都一根独大)。
+        for city_name in config.CITIES:
+            city_name = city_name.strip()
+            area_code = config.CITY_CODES.get(city_name, "")
+            for kw in config.KEYWORDS:
+                kw = kw.strip()
+                print(f"[real] 城市:{city_name}  关键词:{kw}")
+                for pg in range(1, config.MAX_PAGES + 1):
+                    url = (
+                        f"https://we.51job.com/pc/search?keyword={kw}"
+                        f"&searchType=2&pageNum={pg}"
+                    )
+                    # jobArea 是 51job 的城市编码;拿不到编码就退回不带(全国)
+                    if area_code:
+                        url += f"&jobArea={area_code}"
+                    page.goto(url, timeout=60000)
+                    # 等岗位卡片真正渲染出来(动态加载),最多等 15 秒
+                    try:
+                        page.wait_for_selector(".joblist-item", timeout=15000)
+                    except Exception:
+                        print(f"    第 {pg} 页:等不到岗位卡片,可能被反爬拦截或没有结果")
+                    page.wait_for_timeout(int(config.REQUEST_DELAY * 1000))
 
-                cards = _extract_cards(page)
-                for c in cards:
-                    c["keyword"] = kw
-                    c["source"] = "51job"
-                if cards:
-                    total += clean_and_save(cards)
-                print(f"  第 {pg} 页,抓到 {len(cards)} 条")
-                time.sleep(config.REQUEST_DELAY)
+                    cards = _extract_cards(page)
+                    for c in cards:
+                        c["keyword"] = kw
+                        c["source"] = "51job"
+                        # 以搜索时指定的城市为准(页面上个别岗位可能标注周边区县)
+                        if not c.get("city"):
+                            c["city"] = city_name
+                    if cards:
+                        total += clean_and_save(cards)
+                    print(f"    第 {pg} 页,抓到 {len(cards)} 条")
+                    time.sleep(config.REQUEST_DELAY)
 
         # 更新登录状态,方便下次复用
         context.storage_state(path=config.STORAGE_STATE)

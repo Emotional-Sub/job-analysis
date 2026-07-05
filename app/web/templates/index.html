@@ -70,6 +70,8 @@
         }
         .chart { width: 100%; height: 340px; }
         .full-width { grid-column: 1 / -1; }
+        /* 技能图有 20 条,需要更高的画布,否则底部条目和 X 轴被挤掉 */
+        .chart-tall { height: 560px; }
 
         .footer {
             text-align: center;
@@ -82,7 +84,7 @@
 <body>
     <div class="header">
         <h1>招聘数据可视化分析平台</h1>
-        <p>基于 Python 爬虫 + Flask + ECharts | 数据来源:招聘网站</p>
+        <p>基于 Python 爬虫 + Flask + ECharts | 数据来源:51job + 猎聘(多源采集)</p>
     </div>
 
     <div class="container">
@@ -108,22 +110,16 @@
 
         <!-- 图表区 -->
         <div class="charts">
-            <div class="chart-box">
-                <h3>各职位平均薪资</h3>
-                <div id="chart_salary_kw" class="chart"></div>
-            </div>
+            <!-- 第一行:城市维度两张对称 -->
             <div class="chart-box">
                 <h3>各城市岗位数量 Top 10</h3>
                 <div id="chart_jobs_city" class="chart"></div>
             </div>
             <div class="chart-box">
-                <h3>各城市平均薪资 Top 10</h3>
+                <h3>各城市薪资中位数 Top 10</h3>
                 <div id="chart_salary_city" class="chart"></div>
             </div>
-            <div class="chart-box">
-                <h3>技能需求热度 Top 20</h3>
-                <div id="chart_skills" class="chart"></div>
-            </div>
+            <!-- 第二行:学历/经验两个饼图对称 -->
             <div class="chart-box">
                 <h3>学历要求分布</h3>
                 <div id="chart_education" class="chart"></div>
@@ -131,6 +127,24 @@
             <div class="chart-box">
                 <h3>经验要求分布</h3>
                 <div id="chart_experience" class="chart"></div>
+            </div>
+            <!-- 第三行:数据源分布 / 各职位平均薪资 -->
+            <div class="chart-box">
+                <h3>各数据源岗位数量</h3>
+                <div id="chart_source" class="chart"></div>
+            </div>
+            <div class="chart-box">
+                <h3>各职位平均薪资</h3>
+                <div id="chart_salary_kw" class="chart"></div>
+            </div>
+            <!-- 第三、四行:两张技能横向长图,整行、样式一致 -->
+            <div class="chart-box full-width">
+                <h3>技能需求热度 Top 20</h3>
+                <div id="chart_skills" class="chart chart-tall"></div>
+            </div>
+            <div class="chart-box full-width">
+                <h3>各技能薪资中位数 Top 15</h3>
+                <div id="chart_salary_skill" class="chart chart-tall"></div>
             </div>
         </div>
     </div>
@@ -148,17 +162,20 @@
     const COLORS = ['#2a5298', '#5b8ff9', '#61ddaa', '#f6bd16', '#e8684a',
                     '#6dc8ec', '#9270ca', '#ff9d4d', '#269a99', '#5d7092'];
 
-    // 1. 各职位平均薪资(横向柱状图)
-    fetchJSON('/api/salary_by_keyword').then(d => {
-        const chart = echarts.init(document.getElementById('chart_salary_kw'));
+    // 各技能薪资中位数(横向柱状图,与技能热度图样式一致,放在其下方对称)
+    fetchJSON('/api/salary_by_skill').then(d => {
+        const chart = echarts.init(document.getElementById('chart_salary_skill'));
+        // 后端已按薪资降序返回,倒序让最高的显示在顶部
+        const skills = d.skills.slice().reverse();
+        const salaries = d.salaries.slice().reverse();
         chart.setOption({
-            tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-            grid: { left: '15%', right: '8%', top: '8%', bottom: '8%' },
+            tooltip: { trigger: 'item', formatter: '{b}: {c}K' },
+            grid: { left: '8%', right: '6%', top: '3%', bottom: '8%' },
             xAxis: { type: 'value', name: '月薪(K)' },
-            yAxis: { type: 'category', data: d.keywords },
+            yAxis: { type: 'category', data: skills },
             series: [{
                 type: 'bar',
-                data: d.salaries,
+                data: salaries,
                 itemStyle: { color: '#2a5298', borderRadius: [0, 4, 4, 0] },
                 label: { show: true, position: 'right', formatter: '{c}K' }
             }]
@@ -181,7 +198,7 @@
         });
     });
 
-    // 3. 各城市平均薪资(纵向柱状图)
+    // 3. 各城市薪资中位数(纵向柱状图)
     fetchJSON('/api/salary_by_city').then(d => {
         const chart = echarts.init(document.getElementById('chart_salary_city'));
         chart.setOption({
@@ -201,17 +218,18 @@
     // 4. 技能需求热度(横向柱状图,替代词云,无需额外插件)
     fetchJSON('/api/skills').then(d => {
         const chart = echarts.init(document.getElementById('chart_skills'));
-        // 数据是 [{name, value}],取前若干,倒序让最高的在顶部
-        const items = d.slice().reverse();
+        // 数据是 [{name, value}],取前 20,倒序让最高的在顶部
+        const items = d.slice(0, 20).reverse();
         chart.setOption({
-            tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-            grid: { left: '20%', right: '8%', top: '5%', bottom: '5%' },
+            tooltip: { trigger: 'item', formatter: '{b}: {c} 个岗位' },
+            grid: { left: '8%', right: '6%', top: '3%', bottom: '8%' },
             xAxis: { type: 'value', name: '需求量' },
             yAxis: { type: 'category', data: items.map(i => i.name) },
             series: [{
                 type: 'bar',
                 data: items.map(i => i.value),
-                itemStyle: { color: '#e8684a', borderRadius: [0, 4, 4, 0] }
+                itemStyle: { color: '#e8684a', borderRadius: [0, 4, 4, 0] },
+                label: { show: true, position: 'right', formatter: '{c}' }
             }]
         });
     });
@@ -246,6 +264,40 @@
                 center: ['50%', '45%'],
                 data: d,
                 label: { formatter: '{b}\n{d}%' }
+            }]
+        });
+    });
+
+    // 各数据源岗位数量(饼图,直观体现多源采集)
+    fetchJSON('/api/jobs_by_source').then(d => {
+        const chart = echarts.init(document.getElementById('chart_source'));
+        chart.setOption({
+            tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
+            legend: { bottom: 0 },
+            color: COLORS,
+            series: [{
+                type: 'pie',
+                radius: ['40%', '65%'],
+                center: ['50%', '45%'],
+                data: d,
+                label: { formatter: '{b}\n{c} ({d}%)' }
+            }]
+        });
+    });
+
+    // 各职位(关键词)平均薪资(纵向柱状图)
+    fetchJSON('/api/salary_by_keyword').then(d => {
+        const chart = echarts.init(document.getElementById('chart_salary_kw'));
+        chart.setOption({
+            tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+            grid: { left: '8%', right: '5%', top: '8%', bottom: '10%' },
+            xAxis: { type: 'category', data: d.keywords },
+            yAxis: { type: 'value', name: '月薪(K)' },
+            series: [{
+                type: 'bar',
+                data: d.salaries,
+                itemStyle: { color: '#9270ca', borderRadius: [4, 4, 0, 0] },
+                label: { show: true, position: 'top', formatter: '{c}K' }
             }]
         });
     });
