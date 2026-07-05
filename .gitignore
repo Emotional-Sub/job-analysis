@@ -12,7 +12,7 @@ venv/
 .env
 
 # 浏览器登录状态(含 cookies,绝不能提交)
-storage_state.json
+storage_state*.json
 
 # 爬虫产出/日志
 *.log

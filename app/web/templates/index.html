@@ -344,13 +344,19 @@
         const chart = echarts.init(document.getElementById('chart_map'));
         const sals = points.map(p => p.salary).filter(v => v != null);
         const maxCnt = Math.max(...points.map(p => p.value[2]), 1);
+        // 薪资要参与 visualMap 上色,必须放进 value 数组里(visualMap 的 dimension
+        // 只认数字索引,不认额外字段)。value = [经度, 纬度, 岗位数, 薪资中位数]。
+        const data = points.map(p => ({
+            name: p.name,
+            value: [p.value[0], p.value[1], p.value[2], p.salary == null ? 0 : p.salary]
+        }));
         chart.setOption({
             tooltip: {
                 trigger: 'item',
                 formatter: p => {
                     const v = p.data;
                     if (!v || !v.value) return p.name;
-                    return `${v.name}<br/>岗位数: ${v.value[2]}<br/>薪资中位数: ${v.salary == null ? '—' : v.salary + 'K'}`;
+                    return `${v.name}<br/>岗位数: ${v.value[2]}<br/>薪资中位数: ${v.value[3] ? v.value[3] + 'K' : '—'}`;
                 }
             },
             visualMap: {
@@ -361,7 +367,7 @@
                 text: ['高薪', '低薪'],
                 calculable: true,
                 inRange: { color: ['#5b8ff9', '#f6bd16', '#e8684a'] },
-                dimension: 'salary'
+                dimension: 3          // value 里第 4 位是薪资
             },
             geo: {
                 map: 'china',
@@ -372,14 +378,9 @@
             series: [{
                 type: 'scatter',
                 coordinateSystem: 'geo',
-                data: points.map(p => ({
-                    name: p.name,
-                    value: p.value,       // [经度, 纬度, 岗位数]
-                    salary: p.salary
-                })),
-                // 点大小按岗位数缩放(8~40 像素)
+                data: data,
+                // 点大小按岗位数(value[2])缩放(8~40 像素)
                 symbolSize: v => 8 + (v[2] / maxCnt) * 32,
-                encode: { value: 2 },
                 itemStyle: { opacity: 0.85 }
             }]
         });
