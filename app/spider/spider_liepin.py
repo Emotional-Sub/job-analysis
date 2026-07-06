@@ -24,6 +24,7 @@ from app import config
 from app.db.session import init_db
 from app.spider.pipeline import clean_and_save
 from app.spider.utils import extract_skills
+from app.spider.checkpoint import Checkpoint
 
 
 # 猎聘登录状态单独存一份,和 51job 互不干扰
