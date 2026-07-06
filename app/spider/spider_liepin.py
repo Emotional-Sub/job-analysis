@@ -304,17 +304,19 @@ def run_real() -> None:
         cp = Checkpoint("liepin")
         print(f"[liepin] 剩余待抓组合:{cp.remaining(config.CITIES, config.KEYWORDS)} 组")
 
-        # 城市 × 关键词 双层循环
-        for city_name in config.CITIES:
+        # 城市 × 关键词 双层循环。enumerate 从 1 计数,严格按 config.CITIES 的
+        # 顺序抓(该列表已按用户指定的 1~20 城顺序排好),日志带 [序号/总数] 便于核对进度。
+        total_cities = len(config.CITIES)
+        for idx, city_name in enumerate(config.CITIES, start=1):
             city_name = city_name.strip()
             dq_code = config.LIEPIN_CITY_CODES.get(city_name, "")
             for kw in config.KEYWORDS:
                 kw = kw.strip()
                 # 已抓完的组合直接跳过(断点续抓核心)
                 if cp.done(city_name, kw):
-                    print(f"[liepin] 跳过已抓:{city_name} × {kw}")
+                    print(f"[liepin] 跳过已抓:[{idx}/{total_cities}] {city_name} × {kw}")
                     continue
-                print(f"[liepin] 城市:{city_name}  关键词:{kw}")
+                print(f"[liepin] [{idx}/{total_cities}] 城市:{city_name}  关键词:{kw}")
                 empty_streak = 0
                 for pg in range(0, config.MAX_PAGES):
                     # 猎聘搜索:key=关键词,dq=城市码,curPage 从 0 开始
@@ -371,7 +373,7 @@ def run_real() -> None:
                         print(f"    连续 {empty_streak} 页 0 条,跳过该组")
                         break
 
-                    time.sleep(config.REQUEST_DELAY)
+                    config.sleep_between_requests()
 
                 # 这一组正常抓完,标记进度并落盘。下次重启会跳过这一组。
                 # (中途硬崩的组不会走到这里,故不会被误标记,下次会重抓)

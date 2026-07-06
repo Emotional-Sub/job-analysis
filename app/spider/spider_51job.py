@@ -205,16 +205,17 @@ def run_real() -> None:
 
         # 双层循环:城市 × 关键词。这样每个城市都能抓到足够样本,
         # "各城市"相关图表才有横向对比价值(不再是成都一根独大)。
-        for city_name in config.CITIES:
+        total_cities = len(config.CITIES)
+        for idx, city_name in enumerate(config.CITIES, start=1):
             city_name = city_name.strip()
             area_code = config.CITY_CODES.get(city_name, "")
             for kw in config.KEYWORDS:
                 kw = kw.strip()
                 # 已抓完的组合直接跳过(断点续抓核心)
                 if cp.done(city_name, kw):
-                    print(f"[real] 跳过已抓:{city_name} × {kw}")
+                    print(f"[real] 跳过已抓:[{idx}/{total_cities}] {city_name} × {kw}")
                     continue
-                print(f"[real] 城市:{city_name}  关键词:{kw}")
+                print(f"[real] [{idx}/{total_cities}] 城市:{city_name}  关键词:{kw}")
                 for pg in range(1, config.MAX_PAGES + 1):
                     url = (
                         f"https://we.51job.com/pc/search?keyword={kw}"
