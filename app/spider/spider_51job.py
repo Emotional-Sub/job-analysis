@@ -19,6 +19,7 @@ from typing import List, Dict
 
 from app import config
 from app.db.session import init_db
+from app.spider.checkpoint import Checkpoint
 from app.spider.pipeline import clean_and_save
 from app.spider.utils import extract_skills
 
@@ -198,6 +199,10 @@ def run_real() -> None:
             context.storage_state(path=config.STORAGE_STATE)
             print(f"[real] 登录状态已保存到 {config.STORAGE_STATE}")
 
+        # 断点续抓:读回已抓完的「城市×关键词」组合,被封/重启后跳过已完成的。
+        cp = Checkpoint("51job")
+        print(f"[real] 剩余待抓组合:{cp.remaining(config.CITIES, config.KEYWORDS)} 组")
+
         # 双层循环:城市 × 关键词。这样每个城市都能抓到足够样本,
         # "各城市"相关图表才有横向对比价值(不再是成都一根独大)。
         for city_name in config.CITIES:
@@ -205,6 +210,10 @@ def run_real() -> None:
             area_code = config.CITY_CODES.get(city_name, "")
             for kw in config.KEYWORDS:
                 kw = kw.strip()
+                # 已抓完的组合直接跳过(断点续抓核心)
+                if cp.done(city_name, kw):
+                    print(f"[real] 跳过已抓:{city_name} × {kw}")
+                    continue
                 print(f"[real] 城市:{city_name}  关键词:{kw}")
                 for pg in range(1, config.MAX_PAGES + 1):
                     url = (
@@ -220,7 +229,7 @@ def run_real() -> None:
                         page.wait_for_selector(".joblist-item", timeout=15000)
                     except Exception:
                         print(f"    第 {pg} 页:等不到岗位卡片,可能被反爬拦截或没有结果")
-                    page.wait_for_timeout(int(config.REQUEST_DELAY * 1000))
+                    page.wait_for_timeout(int(config.request_delay_seconds() * 1000))
 
                     cards = _extract_cards(page)
                     for c in cards:
@@ -232,7 +241,11 @@ def run_real() -> None:
                     if cards:
                         total += clean_and_save(cards)
                     print(f"    第 {pg} 页,抓到 {len(cards)} 条")
-                    time.sleep(config.REQUEST_DELAY)
+                    config.sleep_between_requests()
+
+                # 这一组正常抓完,标记进度并落盘。下次重启会跳过这一组。
+                # (中途硬崩的组不会走到这里,故不会被误标记,下次会重抓)
+                cp.mark(city_name, kw)
 
         # 更新登录状态,方便下次复用
         context.storage_state(path=config.STORAGE_STATE)

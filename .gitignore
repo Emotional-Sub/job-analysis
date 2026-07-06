@@ -19,6 +19,9 @@ storage_state*.json
 data/*.csv
 data/*.xlsx
 
+# 断点续抓进度缓存(纯本地进度,删掉=从头抓,不该进 git)
+.checkpoint_*.json
+
 # IDE
 .idea/
 .vscode/
