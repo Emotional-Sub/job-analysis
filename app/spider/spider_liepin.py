@@ -299,20 +299,12 @@ def run_real() -> None:
         # 连续多少页抓到 0 条就判定当前城市被拦/无更多结果,提前跳到下一组
         EMPTY_PAGE_LIMIT = 2
 
-        # 断点续抓:读回已抓完的「城市×关键词」组合,被封/重启后跳过已完成的。
-        cp = Checkpoint("liepin")
-        print(f"[liepin] 剩余待抓组合:{cp.remaining(config.CITIES, config.KEYWORDS)} 组")
-
         # 城市 × 关键词 双层循环
         for city_name in config.CITIES:
             city_name = city_name.strip()
             dq_code = config.LIEPIN_CITY_CODES.get(city_name, "")
             for kw in config.KEYWORDS:
                 kw = kw.strip()
-                # 已抓完的组合直接跳过(断点续抓核心)
-                if cp.done(city_name, kw):
-                    print(f"[liepin] 跳过已抓:{city_name} × {kw}")
-                    continue
                 print(f"[liepin] 城市:{city_name}  关键词:{kw}")
                 empty_streak = 0
                 for pg in range(0, config.MAX_PAGES):
@@ -331,7 +323,7 @@ def run_real() -> None:
                         if empty_streak >= EMPTY_PAGE_LIMIT:
                             print(f"    连续 {empty_streak} 页异常,疑似被拦,跳过该组")
                             break
-                        config.sleep_between_requests()
+                        time.sleep(config.REQUEST_DELAY)
                         continue
 
                     # 等岗位卡片渲染(动态加载),最多等 15 秒。
@@ -346,10 +338,10 @@ def run_real() -> None:
                         if empty_streak >= EMPTY_PAGE_LIMIT:
                             print(f"    连续 {empty_streak} 页无结果,跳过该组")
                             break
-                        config.sleep_between_requests()
+                        time.sleep(config.REQUEST_DELAY)
                         continue
 
-                    page.wait_for_timeout(int(config.request_delay_seconds() * 1000))
+                    page.wait_for_timeout(int(config.REQUEST_DELAY * 1000))
 
                     cards = _extract_cards(page)
                     for c in cards:
@@ -371,10 +363,6 @@ def run_real() -> None:
                         break
 
                     time.sleep(config.REQUEST_DELAY)
-
-                # 这一组正常抓完,标记进度并落盘。下次重启会跳过这一组。
-                # (中途硬崩的组不会走到这里,故不会被误标记,下次会重抓)
-                cp.mark(city_name, kw)
 
                 # 每组抓完存一次登录态,中途崩了也不丢已保存的 cookie
                 try:

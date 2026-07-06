@@ -3,8 +3,6 @@
 用法:先把 .env.example 复制成 .env 并填好自己的 MySQL 密码。
 """
 import os
-import random
-import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -99,23 +97,8 @@ CITY = os.getenv("CITY", "全国")
 # 每个关键词最多爬多少页(先小一点跑通)
 MAX_PAGES = int(os.getenv("MAX_PAGES", "3"))
 
-# 请求间隔(秒),防止爬太快被封。这是"基础"延迟,实际等待 = 基础 + 随机抖动。
-REQUEST_DELAY = float(os.getenv("REQUEST_DELAY", "10"))
-
-# 随机抖动上限(秒)。固定间隔本身就是一种可被识别的访问模式(每次都精确 N 秒),
-# 反爬会盯这个规律性。每次请求在 [REQUEST_DELAY, REQUEST_DELAY+REQUEST_JITTER]
-# 之间随机取值,让节奏看起来更像人。设 0 则退回固定间隔。
-REQUEST_JITTER = float(os.getenv("REQUEST_JITTER", "5"))
-
-
-def request_delay_seconds() -> float:
-    """返回本次请求应等待的秒数:基础延迟 + [0, REQUEST_JITTER] 的随机抖动。"""
-    return REQUEST_DELAY + random.uniform(0, REQUEST_JITTER)
-
-
-def sleep_between_requests() -> None:
-    """按带抖动的间隔阻塞等待。爬虫主循环统一调这个,不要再直接 time.sleep 固定值。"""
-    time.sleep(request_delay_seconds())
+# 请求间隔(秒),防止爬太快被封
+REQUEST_DELAY = float(os.getenv("REQUEST_DELAY", "3"))
 
 # 是否显示浏览器窗口(True=看得见,调试用;False=无头,正式跑用)
 HEADLESS = os.getenv("HEADLESS", "False").lower() == "true"
