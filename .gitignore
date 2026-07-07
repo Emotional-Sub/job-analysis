@@ -29,7 +29,9 @@ preview_*.txt
 city_after.txt
 
 # 断点续抓进度缓存(纯本地进度,删掉=从头抓,不该进 git)
+# .bak 是手动抓数据时的断点备份,同样只在本地保留
 .checkpoint_*.json
+.checkpoint_*.json.bak
 
 # IDE
 .idea/
