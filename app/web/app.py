@@ -80,6 +80,56 @@ def create_app() -> Flask:
     def api_city_geo():
         return jsonify(stats.city_geo_stats())
 
+    # ---------------- 相关性分析接口 ----------------
+    @app.route("/api/salary_correlation")
+    def api_salary_correlation():
+        return jsonify(stats.salary_factor_correlation())
+
+    # ---------------- 薪资分布接口 ----------------
+    @app.route("/api/salary_histogram")
+    def api_salary_histogram():
+        return jsonify(stats.salary_histogram())
+
+    # ---------------- 数据导出(CSV 下载) ----------------
+    @app.route("/api/export.csv")
+    def api_export_csv():
+        """把 job 表导出成 CSV 供下载。用 utf-8-sig(带 BOM),
+        Excel 打开中文不乱码。"""
+        import csv
+        import io
+
+        from app.db.session import get_session
+        from app.db.models import Job
+
+        session = get_session()
+        try:
+            jobs = session.query(Job).all()
+            buf = io.StringIO()
+            writer = csv.writer(buf)
+            writer.writerow([
+                "来源", "职位关键词", "岗位名称", "公司", "城市",
+                "学历", "经验", "薪资原文",
+                "最低月薪(K)", "最高月薪(K)", "平均月薪(K)", "技能标签",
+            ])
+            for j in jobs:
+                writer.writerow([
+                    j.source, j.keyword, j.title, j.company, j.city,
+                    j.education, j.experience, j.salary_text,
+                    j.salary_min, j.salary_max, j.salary_avg, j.tags,
+                ])
+        finally:
+            session.close()
+
+        from flask import Response
+        csv_bytes = buf.getvalue().encode("utf-8-sig")
+        return Response(
+            csv_bytes,
+            mimetype="text/csv",
+            headers={
+                "Content-Disposition": "attachment; filename=jobs_export.csv"
+            },
+        )
+
     # ---------------- 薪资预测接口 ----------------
     @app.route("/api/model_scores")
     def api_model_scores():

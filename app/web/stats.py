@@ -447,3 +447,118 @@ def city_geo_stats(min_samples: int = 5) -> List[Dict]:
         return result
     finally:
         session.close()
+
+
+# 学历/经验映射成有序数值,才能和薪资算相关性(城市/职位是无序类别,不参与)。
+# 数值越大表示要求越高,与"薪资应随之升高"的方向一致,相关系数才有解读意义。
+_EDU_ORDER = {"高中及以下": 1, "不限": 1, "大专": 2, "本科": 3, "硕士": 4, "博士": 5}
+_EXP_ORDER = {
+    "应届/不限": 0, "1年以下": 1, "1-3年": 2, "3-5年": 3, "5-10年": 4, "10年以上": 5,
+}
+
+
+def salary_factor_correlation() -> Dict:
+    """
+    薪资影响因素相关性矩阵,用于热力图。
+
+    只纳入可量化的有序/数值变量:学历、经验、技能数量、月薪。
+    城市、职位是无序类别,皮尔逊相关对它们没有意义,故不纳入(它们的
+    影响已在"各城市薪资""各职位薪资"和模型特征重要性里体现)。
+
+    做法:把学历/经验按等级映射成整数,技能数量由 tags 现算,与 salary_avg
+    一起组成矩阵,算两两皮尔逊相关系数。返回 {factors, matrix},matrix[i][j]
+    是因素 i 与 j 的相关系数(-1~1),对角线为 1。
+    """
+    session = get_session()
+    try:
+        rows = (
+            session.query(
+                Job.education, Job.experience, Job.tags, Job.salary_avg
+            )
+            .filter(Job.salary_avg.isnot(None))
+            .all()
+        )
+    finally:
+        session.close()
+
+    # 组装成数值样本:每行 [学历, 经验, 技能数, 月薪];缺有序映射的行跳过
+    edu_v, exp_v, skill_v, sal_v = [], [], [], []
+    for edu, exp, tags, sal in rows:
+        if edu not in _EDU_ORDER or exp not in _EXP_ORDER:
+            continue
+        edu_v.append(_EDU_ORDER[edu])
+        exp_v.append(_EXP_ORDER[exp])
+        skill_v.append(len([t for t in (tags or "").split(",") if t.strip()]))
+        sal_v.append(float(sal))
+
+    factors = ["学历", "经验", "技能数量", "月薪"]
+    cols = [edu_v, exp_v, skill_v, sal_v]
+
+    # 皮尔逊相关系数:cov(x,y) / (std(x)*std(y))。样本太少或某列无变化时置 0。
+    def _pearson(x: List[float], y: List[float]) -> float:
+        n = len(x)
+        if n < 2:
+            return 0.0
+        mx, my = sum(x) / n, sum(y) / n
+        cov = sum((a - mx) * (b - my) for a, b in zip(x, y))
+        vx = sum((a - mx) ** 2 for a in x)
+        vy = sum((b - my) ** 2 for b in y)
+        if vx == 0 or vy == 0:
+            return 0.0
+        return cov / (vx ** 0.5 * vy ** 0.5)
+
+    # ECharts 热力图吃 [x索引, y索引, 值] 三元组
+    data = []
+    for i in range(len(factors)):
+        for j in range(len(factors)):
+            r = 1.0 if i == j else _pearson(cols[i], cols[j])
+            data.append([j, i, round(r, 2)])
+
+    return {"factors": factors, "data": data, "n_samples": len(sal_v)}
+
+
+def salary_histogram(bin_width: int = 5) -> Dict:
+    """
+    薪资分布直方图:按月薪区间分桶统计岗位数。
+
+    中位数/平均数只给一个点,看不出分布形状。直方图能显示薪资的
+    集中区间和右偏程度(是否少数高薪岗拉高均值),比单一指标信息量大。
+
+    bin_width 是桶宽(千元),默认 5K 一档:[0,5)、[5,10)、[10,15)...
+    最后一档为"上限及以上"兜底,避免极高薪拉出一长串空桶。
+    返回 {labels: ["0-5K",...], counts: [...], median, mean}。
+    """
+    session = get_session()
+    try:
+        rows = (
+            session.query(Job.salary_avg)
+            .filter(Job.salary_avg.isnot(None))
+            .all()
+        )
+    finally:
+        session.close()
+
+    sals = [float(s) for (s,) in rows if s is not None]
+    if not sals:
+        return {"labels": [], "counts": [], "median": 0, "mean": 0}
+
+    # 桶上限:取一个能覆盖绝大多数样本的整数上限(50K),超出的都归到"50K+"。
+    # 这样避免个别 60-100K 的岗位拉出十几个空桶,图会很难看。
+    cap = 50
+    n_bins = cap // bin_width  # 0-50K 分成 10 档(每档 5K)
+    counts = [0] * (n_bins + 1)  # 最后一档是 "cap 及以上"
+    for s in sals:
+        idx = int(s // bin_width)
+        if idx >= n_bins:
+            idx = n_bins  # 归入 "50K+" 兜底档
+        counts[idx] += 1
+
+    labels = [f"{i*bin_width}-{(i+1)*bin_width}K" for i in range(n_bins)]
+    labels.append(f"{cap}K+")
+
+    return {
+        "labels": labels,
+        "counts": counts,
+        "median": round(median(sals), 1),
+        "mean": round(sum(sals) / len(sals), 1),
+    }

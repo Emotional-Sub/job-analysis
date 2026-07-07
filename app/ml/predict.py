@@ -19,12 +19,15 @@ import os
 import pickle
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import cross_val_score, train_test_split
 from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.inspection import permutation_importance
+from sklearn.inspection import permutation_importance
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
 
@@ -35,12 +38,31 @@ from app.db.models import Job
 # 模型文件路径(与本模块同目录)
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "model.pkl")
 
-# 参与训练的类别特征列
-CAT_FEATURES = ["city", "education", "experience", "keyword"]
+# 参与训练的特征:类别特征走 One-Hot,数值特征直接透传。
+# 相比最初只有 city/education/experience,这里补了两类信号:
+#   - keyword / source:岗位方向、数据来源(不同站点薪资口径有差异)
+#   - skill_count:岗位要求的技能数量(要求越多通常越高级、薪资越高),
+#     这是唯一的数值特征,能给模型一点"岗位复杂度"的量化信号。
+CAT_FEATURES = ["city", "education", "experience", "keyword", "source"]
+NUM_FEATURES = ["skill_count"]
+FEATURES = CAT_FEATURES + NUM_FEATURES
+# 特征中文名(展示"特征重要性图"时用,比英文列名友好)
+FEATURE_LABELS = {
+    "city": "城市",
+    "education": "学历",
+    "experience": "经验",
+    "keyword": "职位方向",
+    "source": "数据来源",
+    "skill_count": "技能数量",
+}
 
 
 def _load_dataframe() -> pd.DataFrame:
-    """从 job 表读出训练数据,返回 DataFrame(只保留有薪资和关键特征的行)。"""
+    """从 job 表读出训练数据,返回 DataFrame(只保留有薪资和关键特征的行)。
+
+    skill_count 由 tags(逗号分隔的技能串)现算:有几个技能就是几。
+    tags 为空则记 0。
+    """
     session = get_session()
     try:
         rows = (
@@ -49,6 +71,8 @@ def _load_dataframe() -> pd.DataFrame:
                 Job.education,
                 Job.experience,
                 Job.keyword,
+                Job.source,
+                Job.tags,
                 Job.salary_avg,
             )
             .filter(
@@ -64,8 +88,20 @@ def _load_dataframe() -> pd.DataFrame:
         session.close()
 
     df = pd.DataFrame(
-        rows, columns=["city", "education", "experience", "keyword", "salary_avg"]
+        rows,
+        columns=[
+            "city", "education", "experience", "keyword",
+            "source", "tags", "salary_avg",
+        ],
     )
+    # 由 tags 派生技能数量:非空逗号串的元素个数
+    df["skill_count"] = (
+        df["tags"].fillna("").apply(
+            lambda s: len([t for t in str(s).split(",") if t.strip()])
+        )
+    )
+    # source 偶有缺失,填一个占位类别,避免 One-Hot 报错
+    df["source"] = df["source"].fillna("unknown")
     return df
 
 
@@ -83,10 +119,11 @@ def _build_models() -> Dict[str, object]:
 
 
 def _make_pipeline(model) -> Pipeline:
-    """把 One-Hot 编码器和回归模型串成一条 sklearn Pipeline。"""
+    """把预处理(类别 One-Hot + 数值透传)和回归模型串成一条 sklearn Pipeline。"""
     encoder = ColumnTransformer(
         transformers=[
             ("cat", OneHotEncoder(handle_unknown="ignore"), CAT_FEATURES),
+            ("num", "passthrough", NUM_FEATURES),
         ]
     )
     return Pipeline([("encoder", encoder), ("model", model)])
@@ -104,7 +141,7 @@ def train() -> Dict:
             f"训练样本太少({n}条),先跑采集补充数据再训练。"
         )
 
-    X = df[CAT_FEATURES]
+    X = df[FEATURES]
     y = df["salary_avg"]
 
     # 留出测试集用于报告最终误差(交叉验证用于选型)
@@ -142,6 +179,28 @@ def train() -> Dict:
     # 用全量数据重训最优模型(交叉验证只为选型,最终模型吃满所有数据)
     best_pipeline.fit(X, y)
 
+    # 特征重要性:用置换重要性(permutation importance)。
+    # 原理:训练后把某一列的值随机打乱,看模型 R² 掉多少 —— 掉得越多说明
+    # 该特征越关键。它模型无关(线性/树都能用)、且直接反映"对预测的贡献",
+    # 比树自带的 feature_importances_ 更公平,论文里也好解释。
+    # 在测试集上算,避免用训练集高估。n_repeats 多算几次取均值更稳。
+    perm = permutation_importance(
+        best_pipeline, X_test, y_test,
+        n_repeats=10, random_state=42, scoring="r2",
+    )
+    # 归一化成占比(相对重要性),前端画柱状图更直观。负值(打乱后反而更好,
+    # 属噪声)裁剪为 0。按重要性降序。
+    raw = {f: max(float(v), 0.0) for f, v in zip(FEATURES, perm.importances_mean)}
+    total_imp = sum(raw.values()) or 1.0
+    feature_importance = sorted(
+        [
+            {"feature": FEATURE_LABELS.get(f, f), "importance": round(v / total_imp, 4)}
+            for f, v in raw.items()
+        ],
+        key=lambda d: d["importance"],
+        reverse=True,
+    )
+
     # 收集每个特征的可选值,供前端下拉框用。
     # 城市特别处理:只列 config 里的目标城市(且训练数据里确实出现过的),
     # 避免把 51job 带出的周边县市、猎聘杂散城市都塞进下拉框(那样有 50+ 项,乱)。
@@ -159,6 +218,7 @@ def train() -> Dict:
         "scores": scores,
         "best_model": best_name,
         "feature_options": feature_options,
+        "feature_importance": feature_importance,
     }
 
     # 持久化:最优模型 + 报告一起存
@@ -199,9 +259,13 @@ def predict(
     if not data:
         return None
     pipe = data["pipeline"]
+    # 前端只提供 4 个字段;模型还吃 source / skill_count,给合理默认值:
+    #   source     -> "51job"(样本量最大的来源,最具代表性)
+    #   skill_count-> 2(岗位技能数的典型值),让预测落在常规区间
     X = pd.DataFrame(
         [{"city": city, "education": education,
-          "experience": experience, "keyword": keyword}]
+          "experience": experience, "keyword": keyword,
+          "source": "51job", "skill_count": 2}]
     )
     pred = pipe.predict(X)[0]
     # 薪资不会为负,兜底裁剪

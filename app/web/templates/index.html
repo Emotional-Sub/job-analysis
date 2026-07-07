@@ -6,6 +6,8 @@
     <title>招聘数据可视化分析平台</title>
     <!-- ECharts 从 CDN 引入,不用本地安装 -->
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+    <!-- 词云插件(依赖 echarts,必须在其后加载) -->
+    <script src="https://cdn.jsdelivr.net/npm/echarts-wordcloud@2.1.0/dist/echarts-wordcloud.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -145,6 +147,13 @@
         .full-width { grid-column: 1 / -1; }
         /* 技能图有 20 条,需要更高的画布,否则底部条目和 X 轴被挤掉 */
         .chart-tall { height: 560px; }
+        /* 技能热度:柱状图 + 词云并排,各占一半宽 */
+        .skills-row { display: flex; gap: 20px; }
+        .skills-half { flex: 1; min-width: 0; }
+        /* 窄屏(手机/窄窗)时并排会挤成一团,改成上下堆叠 */
+        @media (max-width: 900px) {
+            .skills-row { flex-direction: column; }
+        }
 
         .footer {
             text-align: center;
@@ -211,6 +220,14 @@
                 <tbody></tbody>
             </table>
             <div class="model-note" id="pf_note"></div>
+            <!-- 特征重要性:模型"靠什么"预测薪资,回答答辩必问的"模型学到了什么" -->
+            <div id="pf_importance_wrap" style="display:none; margin-top:20px;">
+                <h3 style="font-size:15px; margin-bottom:4px;">特征重要性(模型靠什么预测薪资)</h3>
+                <div class="model-note" style="margin-top:0;">
+                    置换重要性:打乱某特征后模型精度下降越多,说明它越关键。数值为相对占比。
+                </div>
+                <div id="chart_importance" class="chart"></div>
+            </div>
         </div>
 
         <!-- 图表区 -->
@@ -256,14 +273,27 @@
                 <h3>各数据源 学历要求结构对比(占比%)</h3>
                 <div id="chart_src_edu" class="chart"></div>
             </div>
-            <!-- 第三、四行:两张技能横向长图,整行、样式一致 -->
+            <!-- 技能需求热度:左柱状图(精确读数) + 右词云(视觉概览),并排 -->
             <div class="chart-box full-width">
                 <h3>技能需求热度 Top 20</h3>
-                <div id="chart_skills" class="chart chart-tall"></div>
+                <div class="skills-row">
+                    <div id="chart_skills" class="chart chart-tall skills-half"></div>
+                    <div id="chart_wordcloud" class="chart chart-tall skills-half"></div>
+                </div>
             </div>
             <div class="chart-box full-width">
                 <h3>各技能薪资中位数 Top 15</h3>
                 <div id="chart_salary_skill" class="chart chart-tall"></div>
+            </div>
+            <!-- 薪资影响因素相关性热力图:学历/经验/技能数/月薪 两两相关 -->
+            <div class="chart-box full-width">
+                <h3>薪资影响因素相关性热力图(皮尔逊相关系数)</h3>
+                <div id="chart_corr" class="chart"></div>
+            </div>
+            <!-- 薪资分布直方图:看薪资集中区间和右偏程度,比单一中位数信息量大 -->
+            <div class="chart-box full-width">
+                <h3>薪资分布直方图(月薪区间 × 岗位数)</h3>
+                <div id="chart_hist" class="chart"></div>
             </div>
         </div>
     </div>
@@ -386,14 +416,16 @@
         });
     });
 
-    // 4. 技能需求热度(横向柱状图,替代词云,无需额外插件)
+    // 4. 技能需求热度:左侧横向柱状图(精确读数) + 右侧词云(直观热度)。
+    //    两图共用 /api/skills 数据,只发一次请求。
     fetchJSON('/api/skills').then(d => {
-        const chart = echarts.init(document.getElementById('chart_skills'));
-        // 数据是 [{name, value}],取前 20,倒序让最高的在顶部
+        // --- 左:横向柱状图,取前 20,倒序让最高的在顶部 ---
+        const barChart = echarts.init(document.getElementById('chart_skills'));
         const items = d.slice(0, 20).reverse();
-        chart.setOption({
+        barChart.setOption({
+            title: { text: 'Top 20 需求量', left: 'center', textStyle: { fontSize: 13, color: '#888' } },
             tooltip: { trigger: 'item', formatter: '{b}: {c} 个岗位' },
-            grid: { left: '8%', right: '6%', top: '3%', bottom: '8%' },
+            grid: { left: '8%', right: '6%', top: '12%', bottom: '8%' },
             xAxis: { type: 'value', name: '需求量' },
             yAxis: { type: 'category', data: items.map(i => i.name) },
             series: [{
@@ -401,6 +433,36 @@
                 data: items.map(i => i.value),
                 itemStyle: { color: '#e8684a', borderRadius: [0, 4, 4, 0] },
                 label: { show: true, position: 'right', formatter: '{c}' }
+            }]
+        });
+
+        // --- 右:词云,词的大小 = 需求量,颜色随机,直观展示热门技能 ---
+        const wcChart = echarts.init(document.getElementById('chart_wordcloud'));
+        wcChart.setOption({
+            title: { text: '技能热度词云', left: 'center', textStyle: { fontSize: 13, color: '#888' } },
+            tooltip: { show: true, formatter: '{b}: {c} 个岗位' },
+            series: [{
+                type: 'wordCloud',
+                shape: 'circle',
+                width: '92%',
+                height: '88%',
+                top: '10%',
+                sizeRange: [14, 68],
+                rotationRange: [-45, 45],
+                gridSize: 8,
+                drawOutOfBound: false,
+                textStyle: {
+                    fontFamily: 'sans-serif',
+                    fontWeight: 'bold',
+                    // 每个词随机取一个协调的暖/冷色,视觉更活泼
+                    color: () => {
+                        const palette = ['#2a5298','#e8684a','#3fa45b','#f6bd16','#6dc8ec','#945fb9','#ff9845'];
+                        return palette[Math.floor(Math.random() * palette.length)];
+                    }
+                },
+                emphasis: { textStyle: { textShadowBlur: 6, textShadowColor: '#333' } },
+                // 词云吃 {name, value},接口返回的正是这个结构,直接用
+                data: d
             }]
         });
     });
@@ -551,6 +613,26 @@
         document.getElementById('pf_models').style.display = '';
         note.textContent = `训练样本 ${d.n_samples} 条 · 最优模型:${d.best_model}` +
             ` · R² 偏低是此类问题固有难度(列表页特征有限、薪资高方差),已如实呈现。`;
+
+        // 特征重要性图:置换重要性,越大说明该因素对薪资影响越大
+        if (d.feature_importance && d.feature_importance.length) {
+            document.getElementById('pf_importance_wrap').style.display = '';
+            const chart = echarts.init(document.getElementById('chart_importance'));
+            // 后端已按重要性降序,倒序让最高的落在柱状图顶部
+            const items = d.feature_importance.slice().reverse();
+            chart.setOption({
+                tooltip: { trigger: 'item', formatter: p => `${p.name}: ${(p.value * 100).toFixed(1)}%` },
+                grid: { left: '12%', right: '10%', top: '6%', bottom: '8%' },
+                xAxis: { type: 'value', name: '相对重要性', axisLabel: { formatter: v => (v * 100) + '%' } },
+                yAxis: { type: 'category', data: items.map(i => i.feature) },
+                series: [{
+                    type: 'bar',
+                    data: items.map(i => i.importance),
+                    itemStyle: { color: '#2a5298', borderRadius: [0, 4, 4, 0] },
+                    label: { show: true, position: 'right', formatter: p => (p.value * 100).toFixed(1) + '%' }
+                }]
+            });
+        }
     });
 
     // 点预测按钮:提交表单 -> 显示预测月薪
@@ -574,6 +656,41 @@
         } else {
             box.textContent = d.msg || '预测失败';
         }
+    });
+
+    // 薪资影响因素相关性热力图(学历/经验/技能数/月薪 两两皮尔逊相关)
+    fetchJSON('/api/salary_correlation').then(d => {
+        const chart = echarts.init(document.getElementById('chart_corr'));
+        const factors = d.factors;
+        if (!d.matrix || !d.matrix.length) {
+            chart.setOption({ title: { text: '样本不足,无法计算相关性', left: 'center', top: 'center', textStyle: { fontSize: 13, color: '#aaa' } } });
+            return;
+        }
+        // 把矩阵摊平成 [x, y, 相关系数] 供热力图用
+        const data = [];
+        for (let i = 0; i < factors.length; i++) {
+            for (let j = 0; j < factors.length; j++) {
+                data.push([j, i, d.matrix[i][j]]);
+            }
+        }
+        chart.setOption({
+            tooltip: { formatter: p => `${factors[p.value[1]]} × ${factors[p.value[0]]}<br/>相关系数: ${p.value[2]}` },
+            grid: { left: '14%', right: '6%', top: '6%', bottom: '16%' },
+            xAxis: { type: 'category', data: factors, splitArea: { show: true } },
+            yAxis: { type: 'category', data: factors, splitArea: { show: true } },
+            // 相关系数 [-1,1]:蓝(负)-白(0)-红(正),直观区分正负相关
+            visualMap: {
+                min: -1, max: 1, calculable: true, orient: 'horizontal',
+                left: 'center', bottom: '0%',
+                inRange: { color: ['#2a5298', '#f5f5f5', '#e8684a'] }
+            },
+            series: [{
+                type: 'heatmap',
+                data: data,
+                label: { show: true, formatter: p => p.value[2] },
+                emphasis: { itemStyle: { shadowBlur: 8, shadowColor: 'rgba(0,0,0,0.4)' } }
+            }]
+        });
     });
 
     // 窗口缩放时图表自适应

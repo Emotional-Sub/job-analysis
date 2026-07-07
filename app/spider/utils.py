@@ -6,8 +6,13 @@ import re
 from typing import Optional, Tuple
 
 
+# 法定月计薪天数(用于把"元/天"日薪折算成月薪)。
+# 国家规定月计薪天数 = (365 - 104 双休) / 12 ≈ 21.75 天。
+WORK_DAYS_PER_MONTH = 21.75
+
+
 def _num_to_qian(num: float, unit: str) -> float:
-    """把单个数字按它自己的单位换算成 千元/月。unit 是紧跟在数字后的字符。"""
+    """把单个数字按它自己的单位换算成 千元。unit 是紧跟在数字后的字符。"""
     if "万" in unit or "w" in unit.lower():
         return num * 10.0   # 万 -> 千
     # K / 千 / 无单位,都按千计
@@ -18,14 +23,21 @@ def parse_salary(text: Optional[str]) -> Tuple[Optional[float], Optional[float],
     """
     把薪资文本解析成 (最低, 最高, 平均),单位统一为 千元/月。
 
-    关键点:每个数字带自己的单位分别换算,才能正确处理"8千-1.2万"这类
-    混合单位(低位是千、高位是万)的情况。
+    三种计薪周期都要归一到"千元/月",否则统计和模型会被严重污染:
+      - 月薪(默认):  "15-25K" / "8千-1.2万" / "1.5-3万"(万即万元/月)
+      - 年薪(带/年): "30-60万/年" 要 ÷12 才是月薪,否则 30万被当成 30万/月
+      - 日薪(带/天): "800元/天" 要 ×21.75 计薪日,否则 800 被当成 800千/月
+
+    关键点:月/年薪里每个数字带自己的单位分别换算,才能正确处理"8千-1.2万"
+    这类混合单位(低位是千、高位是万)的情况。
 
     支持常见格式:
         "15-25K"        -> (15, 25, 20)
         "15-25K·13薪"   -> 折算 13 薪 -> (16.25, 27.08, 21.66)
         "8千-1.2万"     -> (8, 12, 10)
         "1.5-3万"       -> (15, 30, 22.5)
+        "30-60万/年"    -> 年薪÷12 -> (25, 50, 37.5)
+        "800元/天"      -> 日薪×21.75 -> (17.4, 17.4, 17.4)
         "20K以上"       -> (20, None, 20)
         "面议"/None     -> (None, None, None)
     """
@@ -34,7 +46,16 @@ def parse_salary(text: Optional[str]) -> Tuple[Optional[float], Optional[float],
 
     t = text.strip().replace(" ", "")
 
-    # 提取 "·N薪" 里的薪资月数,默认 12
+    # 先定计薪周期(决定最后怎么折算到"千元/月")。
+    # 日薪/年薪靠"/天""/年"这类后缀识别;都没有就按月薪处理。
+    if "/天" in t or "/日" in t:
+        period = "day"
+    elif "/年" in t:
+        period = "year"
+    else:
+        period = "month"
+
+    # 提取 "·N薪" 里的薪资月数,默认 12。只有月薪才有"多发几个月"的说法。
     months = 12
     m_months = re.search(r"[·xX*](\d{1,2})薪", t)
     if m_months:
@@ -48,35 +69,47 @@ def parse_salary(text: Optional[str]) -> Tuple[Optional[float], Optional[float],
     if not pairs:
         return None, None, None
 
-    # 若整串里只出现了"万"这一种单位、但某些数字后没写单位
-    # (如 "1.5-3万" 里 1.5 后面没单位),用串里出现过的单位补齐。
-    trailing_unit = ""
-    if "万" in t:
-        trailing_unit = "万"
-    elif "K" in t or "k" in t or "千" in t:
-        trailing_unit = "K"
+    if period == "day":
+        # 日薪:数字是"元/天",按计薪天数折算成千元/月(元×天数÷1000)。
+        nums = [float(n) for n, _ in pairs[:2]]
+        vals = [round(x * WORK_DAYS_PER_MONTH / 1000.0, 2) for x in nums]
+    else:
+        # 月薪/年薪:数字带 K/千/万 单位,先统一换算成"千元"。
+        # 若整串只出现"万"这一种单位、但某些数字后没写单位
+        # (如 "1.5-3万" 里 1.5 后面没单位),用串里出现过的单位补齐。
+        trailing_unit = ""
+        if "万" in t:
+            trailing_unit = "万"
+        elif "K" in t or "k" in t or "千" in t:
+            trailing_unit = "K"
 
-    vals = []
-    for n, u in pairs[:2]:
-        unit = u if u else trailing_unit
-        vals.append(_num_to_qian(float(n), unit))
+        vals = []
+        for n, u in pairs[:2]:
+            unit = u if u else trailing_unit
+            vals.append(_num_to_qian(float(n), unit))
+
+        if period == "year":
+            # 年薪总额(千元)平摊到 12 个月,才是可比的月薪。
+            vals = [round(x / 12.0, 2) for x in vals]
 
     if len(vals) == 1:
         lo = hi = vals[0]
     else:
         lo, hi = vals[0], vals[1]
 
-    # 按 N 薪折算回等效月薪(N薪意味着年终多发,平摊到12个月)
-    factor = months / 12.0
-    lo = round(lo * factor, 2)
-    hi = round(hi * factor, 2)
+    # 按 N 薪折算回等效月薪(N薪意味着年终多发,平摊到12个月)。仅月薪适用。
+    if period == "month":
+        factor = months / 12.0
+        lo = round(lo * factor, 2)
+        hi = round(hi * factor, 2)
+
     avg = round((lo + hi) / 2, 2)
 
     # "20K以上"这种只有一个数,hi 置空但 avg 用该值
     if len(vals) == 1 and ("以上" in t or "+" in t):
         return lo, None, lo
 
-    return lo, hi, avg
+    return round(lo, 2), round(hi, 2), avg
 
 
 def clean_education(text: Optional[str]) -> Optional[str]:
@@ -194,6 +227,11 @@ def extract_skills(*texts: Optional[str]) -> str:
 
 
 if __name__ == "__main__":
-    # 快速自测薪资解析
-    for s in ["15-25K", "15-25K·13薪", "8千-1.2万", "1.5-3万", "20K以上", "面议"]:
+    # 快速自测薪资解析:覆盖月薪/年薪/日薪三种周期
+    cases = [
+        "15-25K", "15-25K·13薪", "8千-1.2万", "1.5-3万", "20K以上", "面议",
+        "30-60万/年", "18-30万/年", "40-80万/年",   # 年薪:应 ÷12
+        "800元/天", "200元/天", "500元/天",          # 日薪:应 ×21.75/1000
+    ]
+    for s in cases:
         print(f"{s:14s} -> {parse_salary(s)}")

@@ -26,7 +26,7 @@ import hashlib
 from typing import List, Dict
 
 from app.db.session import get_session
-from app.db.models import Job
+from app.db.models import Job, RawJob
 from app.spider.utils import (
     parse_salary,
     clean_education,
@@ -63,9 +63,13 @@ def make_job_key(raw: Dict) -> str:
 
 
 def clean_and_save(raw_list: List[Dict]) -> int:
-    """把原始卡片列表清洗后写入数据库,返回新增条数。
+    """把原始卡片列表写入数据库,返回新增(清洗后)条数。
 
-    用 (source, job_key) 去重:同一个岗位只存一次,重爬不会重复入库。
+    双表落地(兑现"采集/分析解耦"的设计):
+      1. raw_job  先存爬到的原文(尽量不加工),便于回溯、重清洗;
+      2. job      再存清洗后的结构化数据,统计/预测都用这张。
+    两张表各自用 (source, job_key) 去重:重爬同一岗位不会重复入库。
+    raw_job 已存在但 job 缺失时,仍会补写 job(比如清洗逻辑改了重灌)。
     """
     session = get_session()
     inserted = 0
@@ -74,12 +78,37 @@ def clean_and_save(raw_list: List[Dict]) -> int:
             source = raw.get("source", "unknown")
             job_key = make_job_key(raw)
 
-            exists = (
-                session.query(Job)
+            # --- 1) 原始表:没存过才写,原文尽量照搬 ---
+            raw_exists = (
+                session.query(RawJob.id)
                 .filter_by(source=source, job_key=job_key)
                 .first()
             )
-            if exists:
+            if not raw_exists:
+                session.add(RawJob(
+                    source=source,
+                    job_key=job_key,
+                    title=raw.get("title"),
+                    salary_text=raw.get("salary_text"),
+                    city=raw.get("city"),
+                    area=raw.get("area"),
+                    experience=raw.get("experience_text"),
+                    education=raw.get("education_text"),
+                    company=raw.get("company"),
+                    company_size=raw.get("company_size"),
+                    industry=raw.get("industry"),
+                    tags=raw.get("tags_text"),
+                    keyword=raw.get("keyword"),
+                    detail_url=raw.get("url"),
+                ))
+
+            # --- 2) 分析表:没存过才写,字段全部清洗归一 ---
+            job_exists = (
+                session.query(Job.id)
+                .filter_by(source=source, job_key=job_key)
+                .first()
+            )
+            if job_exists:
                 continue
 
             lo, hi, avg = parse_salary(raw.get("salary_text"))
