@@ -300,6 +300,17 @@ def run_real() -> None:
         # 连续多少页抓到 0 条就判定当前城市被拦/无更多结果,提前跳到下一组
         EMPTY_PAGE_LIMIT = 2
 
+        # 工作经验分档(workYearCode 是猎聘单选参数,label 仅供日志)。
+        # 逐档抓才能在源头过滤实习岗 —— 不筛经验时列表混大量实习岗,
+        # 每页正式岗被稀释到 2~3 条,还触发 EMPTY_PAGE_LIMIT 早退,
+        # 导致成都这类城市只留下个位数。只抓正式岗相关档:
+        #   应届生=1 / 一年以内=0$1 / 1-3年=1$3
+        WORK_YEAR_CODES = [
+            ("应届生", "1"),
+            ("一年以内", "0$1"),
+            ("1-3年", "1$3"),
+        ]
+
         # 断点续抓:读回已抓完的「城市×关键词」组合,被封/重启后跳过已完成的。
         cp = Checkpoint("liepin")
         print(f"[liepin] 剩余待抓组合:{cp.remaining(config.CITIES, config.KEYWORDS)} 组")
@@ -317,66 +328,77 @@ def run_real() -> None:
                     print(f"[liepin] 跳过已抓:[{idx}/{total_cities}] {city_name} × {kw}")
                     continue
                 print(f"[liepin] [{idx}/{total_cities}] 城市:{city_name}  关键词:{kw}")
-                empty_streak = 0
-                for pg in range(0, config.MAX_PAGES):
-                    # 猎聘搜索:key=关键词,dq=城市码,curPage 从 0 开始
-                    url = f"https://www.liepin.com/zhaopin/?key={kw}&curPage={pg}"
-                    if dq_code:
-                        url += f"&dq={dq_code}"
-
-                    # goto 容错:被反爬掐断连接(ERR_ABORTED)等会抛异常,
-                    # 单页失败不该让整个任务崩溃 —— 记一次空页,继续下一页
-                    try:
-                        page.goto(url, timeout=60000)
-                    except Exception as e:
-                        print(f"    第 {pg + 1} 页:打开失败({type(e).__name__}),跳过")
-                        empty_streak += 1
-                        if empty_streak >= EMPTY_PAGE_LIMIT:
-                            print(f"    连续 {empty_streak} 页异常,疑似被拦,跳过该组")
-                            break
-                        config.sleep_between_requests()
-                        continue
-
-                    # 等岗位卡片渲染(动态加载),最多等 15 秒。
-                    # 等不到就 continue,绝不往下抓 —— 否则抓到的是上一页的残留数据。
-                    try:
-                        page.wait_for_selector(
-                            ".job-card-pc-container", timeout=15000
+                # 逐经验档抓:每档单独一轮请求(workYearCode 单选),在源头筛掉实习岗
+                for wy_label, wy_code in WORK_YEAR_CODES:
+                    print(f"[liepin]   经验档:{wy_label}(workYearCode={wy_code})")
+                    empty_streak = 0
+                    for pg in range(0, config.MAX_PAGES):
+                        # 猎聘搜索参数(2026-07 对照真实页面 URL 核对):
+                        #   currentPage 才是猎聘认的翻页参数(旧代码用 curPage 无效,
+                        #     导致每页都抓第 0 页、后续页被去重丢掉,各城只留第一页的量)
+                        #   pageSize=40 每页拉满 40 条,产出翻倍
+                        #   city 与 dq 都传城市码(真实 URL 两者一致)
+                        #   workYearCode 按经验档筛,源头排除实习岗
+                        url = (
+                            f"https://www.liepin.com/zhaopin/?key={kw}"
+                            f"&currentPage={pg}&pageSize=40&workYearCode={wy_code}"
                         )
-                    except Exception:
-                        print(f"    第 {pg + 1} 页:等不到岗位卡片,可能被反爬拦截或没有结果")
-                        empty_streak += 1
+                        if dq_code:
+                            url += f"&city={dq_code}&dq={dq_code}"
+
+                        # goto 容错:被反爬掐断连接(ERR_ABORTED)等会抛异常,
+                        # 单页失败不该让整个任务崩溃 —— 记一次空页,继续下一页
+                        try:
+                            page.goto(url, timeout=60000)
+                        except Exception as e:
+                            print(f"    第 {pg + 1} 页:打开失败({type(e).__name__}),跳过")
+                            empty_streak += 1
+                            if empty_streak >= EMPTY_PAGE_LIMIT:
+                                print(f"    连续 {empty_streak} 页异常,疑似被拦,跳过该档")
+                                break
+                            config.sleep_between_requests()
+                            continue
+
+                        # 等岗位卡片渲染(动态加载),最多等 15 秒。
+                        # 等不到就 continue,绝不往下抓 —— 否则抓到的是上一页的残留数据。
+                        try:
+                            page.wait_for_selector(
+                                ".job-card-pc-container", timeout=15000
+                            )
+                        except Exception:
+                            print(f"    第 {pg + 1} 页:等不到岗位卡片,可能被反爬拦截或没有结果")
+                            empty_streak += 1
+                            if empty_streak >= EMPTY_PAGE_LIMIT:
+                                print(f"    连续 {empty_streak} 页无结果,跳过该档")
+                                break
+                            config.sleep_between_requests()
+                            continue
+
+                        page.wait_for_timeout(int(config.request_delay_seconds() * 1000))
+
+                        cards = _extract_cards(page)
+                        for c in cards:
+                            c["keyword"] = kw
+                            c["source"] = "liepin"
+                            if not c.get("city"):
+                                c["city"] = city_name
+
+                        if cards:
+                            empty_streak = 0
+                            total += clean_and_save(cards)
+                        else:
+                            # 页面出来了但一条没抓到(可能全被实习岗过滤,或结构变了)
+                            empty_streak += 1
+                        print(f"    第 {pg + 1} 页,抓到 {len(cards)} 条")
+
                         if empty_streak >= EMPTY_PAGE_LIMIT:
-                            print(f"    连续 {empty_streak} 页无结果,跳过该组")
+                            print(f"    连续 {empty_streak} 页 0 条,跳过该档")
                             break
+
                         config.sleep_between_requests()
-                        continue
 
-                    page.wait_for_timeout(int(config.request_delay_seconds() * 1000))
-
-                    cards = _extract_cards(page)
-                    for c in cards:
-                        c["keyword"] = kw
-                        c["source"] = "liepin"
-                        if not c.get("city"):
-                            c["city"] = city_name
-
-                    if cards:
-                        empty_streak = 0
-                        total += clean_and_save(cards)
-                    else:
-                        # 页面出来了但一条没抓到(可能全被实习岗过滤,或结构变了)
-                        empty_streak += 1
-                    print(f"    第 {pg + 1} 页,抓到 {len(cards)} 条")
-
-                    if empty_streak >= EMPTY_PAGE_LIMIT:
-                        print(f"    连续 {empty_streak} 页 0 条,跳过该组")
-                        break
-
-                    config.sleep_between_requests()
-
-                # 这一组正常抓完,标记进度并落盘。下次重启会跳过这一组。
-                # (中途硬崩的组不会走到这里,故不会被误标记,下次会重抓)
+                # 这一组(城市×关键词,含所有经验档)抓完,标记进度并落盘。
+                # (中途硬崩不会走到这里,故不会被误标记,下次会重抓)
                 cp.mark(city_name, kw)
 
                 # 每组抓完存一次登录态,中途崩了也不丢已保存的 cookie
