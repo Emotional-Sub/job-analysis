@@ -27,7 +27,6 @@ from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import cross_val_score, train_test_split
 from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.inspection import permutation_importance
-from sklearn.inspection import permutation_importance
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
 
