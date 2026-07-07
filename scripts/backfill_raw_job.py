@@ -14,8 +14,14 @@ job 表保留了 salary_text(原始薪资文本)、title、company、city、keyw
 字段,足以重建 raw_job 的主要内容。清洗才产生的字段(如归一化学历)在 raw_job
 里按其语义留原文/留空。已存在的 (source, job_key) 跳过,可重复运行。
 
-用法:venv/Scripts/python.exe backfill_raw_job.py
+用法:venv/Scripts/python.exe scripts/backfill_raw_job.py
 """
+import os
+import sys
+
+# 脚本挪进 scripts/ 后,需把项目根目录加进 sys.path,否则 import app 会失败。
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from app.db.session import get_session
 from app.db.models import Job, RawJob
 

@@ -13,10 +13,14 @@
 city 为空/None 的行也视为名单外(无法归属),一并删除。
 
 用法(默认只预览,加 --apply 才真正删除):
-    venv/Scripts/python.exe clean_offlist_cities.py            # 预览会删哪些
-    venv/Scripts/python.exe clean_offlist_cities.py --apply    # 确认后执行删除
+    venv/Scripts/python.exe scripts/clean_offlist_cities.py            # 预览会删哪些
+    venv/Scripts/python.exe scripts/clean_offlist_cities.py --apply    # 确认后执行删除
 """
+import os
 import sys
+
+# 脚本挪进 scripts/ 后,需把项目根目录加进 sys.path,否则 import app 会失败。
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db.session import get_session
 from app.db.models import Job

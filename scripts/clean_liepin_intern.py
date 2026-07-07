@@ -20,11 +20,15 @@
 命中的确实都是实习岗,不会误删正式岗。
 
 用法(默认只预览,加 --apply 才真正删除):
-    venv/Scripts/python.exe clean_liepin_intern.py            # 预览会删哪些
-    venv/Scripts/python.exe clean_liepin_intern.py --apply    # 确认后执行删除
+    venv/Scripts/python.exe scripts/clean_liepin_intern.py            # 预览会删哪些
+    venv/Scripts/python.exe scripts/clean_liepin_intern.py --apply    # 确认后执行删除
 """
+import os
 import sys
 from statistics import median
+
+# 脚本挪进 scripts/ 后,需把项目根目录加进 sys.path,否则 import app 会失败。
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db.session import get_session
 from app.db.models import Job

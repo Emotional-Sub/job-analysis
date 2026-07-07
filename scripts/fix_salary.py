@@ -5,8 +5,14 @@
 把年薪当月薪算,导致出现 300K~800K 的天价异常值,污染了"各城市平均薪资"统计。
 现已修正 parse_salary,本脚本把库里所有记录按新逻辑重算一遍,免得重新爬取。
 
-用法:venv/Scripts/python.exe fix_salary.py
+用法:venv/Scripts/python.exe scripts/fix_salary.py
 """
+import os
+import sys
+
+# 脚本挪进 scripts/ 后,需把项目根目录加进 sys.path,否则 import app 会失败。
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from app.db.session import get_session
 from app.db.models import Job
 from app.spider.utils import parse_salary

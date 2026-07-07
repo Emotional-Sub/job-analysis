@@ -47,14 +47,17 @@ job-analysis/
 │           └── index.html       # 前端页面 + ECharts 图表
 ├── tests/
 │   └── test_parse_salary.py     # 薪资解析单元测试
+├── scripts/                     # 维护脚本 + 页面探针（从项目根用 python scripts/xxx.py 运行）
+│   ├── backfill_raw_job.py      # 从 job 表回填 raw_job
+│   ├── clean_51job_intern.py    # 清理 51job 实习/兼职岗
+│   ├── clean_liepin_intern.py   # 清理猎聘实习/兼职岗
+│   ├── clean_offlist_cities.py  # 清理 20 城白名单外的数据
+│   ├── fix_salary.py            # 用最新 parse_salary 重算全库薪资
+│   ├── probe_51job.py           # 探测 51job 页面结构（反爬/结构变动时用）
+│   └── probe_liepin.py          # 探测猎聘页面结构
 ├── run_spider.py                # 爬虫入口
 ├── run_web.py                   # Web 服务入口
-├── train_model.py              # 薪资预测模型训练入口
-├── backfill_raw_job.py          # 维护脚本：从 job 表回填 raw_job
-├── clean_51job_intern.py        # 维护脚本：清理 51job 实习/兼职岗
-├── clean_liepin_intern.py       # 维护脚本：清理猎聘实习/兼职岗
-├── clean_offlist_cities.py      # 维护脚本：清理 20 城白名单外的数据
-├── fix_salary.py                # 维护脚本：用最新 parse_salary 重算全库薪资
+├── train_model.py               # 薪资预测模型训练入口
 ├── requirements.txt             # 依赖清单
 ├── .env.example                 # 配置模板（复制为 .env 后填写）
 └── .gitignore
@@ -67,7 +70,7 @@ job-analysis/
 - **raw_job（原始岗位表）**：爬虫直接写入，尽量保留站点原始字段，仅做去重。重爬不影响已清洗数据。
 - **job（分析岗位表）**：清洗后的结构化数据，可视化与预测均基于此表。薪资统一折算为「千元/月」，存 `salary_min` / `salary_max` / `salary_avg`。
 
-清洗逻辑改动后，可从 `raw_job` 重新生成 `job`，对应论文中的「数据清洗」环节。存量 job 数据可用 `backfill_raw_job.py` 回填进 raw_job。
+清洗逻辑改动后，可从 `raw_job` 重新生成 `job`，对应论文中的「数据清洗」环节。存量 job 数据可用 `scripts/backfill_raw_job.py` 回填进 raw_job。
 
 ## 快速开始
 
@@ -169,17 +172,23 @@ python -m app.spider.utils                # 快速自测薪资解析函数
 
 ## 维护脚本
 
-均在项目根目录，运行前确保已 cd 到项目目录。清理类脚本默认**预览**，加 `--apply` 才真正改动数据。
+维护脚本都在 `scripts/` 目录下，从**项目根目录**运行（脚本内已自举 sys.path，`python scripts/xxx.py` 即可正确 import app）。清理类脚本默认**预览**，加 `--apply` 才真正改动数据。
 
 | 脚本 | 用途 |
 |------|------|
-| `clean_51job_intern.py` | 清理 51job 实习/兼职岗（含否定词排除，避免误删正式岗） |
-| `clean_liepin_intern.py` | 清理猎聘实习/兼职岗 |
-| `clean_offlist_cities.py` | 清理 20 城白名单外的数据 |
-| `fix_salary.py` | 用最新 `parse_salary` 重算全库薪资 |
-| `backfill_raw_job.py` | 从 job 表回填 raw_job |
+| `scripts/clean_51job_intern.py` | 清理 51job 实习/兼职岗（含否定词排除，避免误删正式岗） |
+| `scripts/clean_liepin_intern.py` | 清理猎聘实习/兼职岗 |
+| `scripts/clean_offlist_cities.py` | 清理 20 城白名单外的数据 |
+| `scripts/fix_salary.py` | 用最新 `parse_salary` 重算全库薪资 |
+| `scripts/backfill_raw_job.py` | 从 job 表回填 raw_job |
+
+```bash
+# 例：预览 51job 实习岗清理（从项目根运行）
+python scripts/clean_51job_intern.py            # 预览
+python scripts/clean_51job_intern.py --apply    # 确认后执行
+```
 
 ## 说明
 
-- 真实抓取的页面选择器需对照站点真实页面核对；招聘站反爬较强且页面结构常变，结构变动时可用 `probe_51job.py` / `probe_liepin.py` 重新探测。
+- 真实抓取的页面选择器需对照站点真实页面核对；招聘站反爬较强且页面结构常变，结构变动时可用 `scripts/probe_51job.py` / `scripts/probe_liepin.py` 重新探测。
 - `.env` 文件包含数据库密码，已在 `.gitignore` 中排除，不会提交到版本库。

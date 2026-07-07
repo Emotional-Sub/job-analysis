@@ -22,6 +22,7 @@ data/*.xlsx
 # 临时排查/输出 txt(查库、清理、预览时写的中间产物,不该进 git)。
 # requirements.txt 是依赖清单,必须提交,故不能用 *.txt 一刀切,逐个/按前缀忽略。
 _*.txt
+_*.csv
 *_report.txt
 *_result.txt
 preview_*.txt
