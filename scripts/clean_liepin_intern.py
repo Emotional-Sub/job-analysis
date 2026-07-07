@@ -61,7 +61,7 @@ def main(apply: bool) -> None:
 
         if not apply:
             print("\n[预览模式] 未做任何改动。确认无误后加 --apply 真正删除:")
-            print("    venv/Scripts/python.exe clean_liepin_intern.py --apply")
+            print("    venv/Scripts/python.exe scripts/clean_liepin_intern.py --apply")
             print("\n将删除的实习岗抽样(前 15 条):")
             for j in interns[:15]:
                 print(f"  [{j.title}]  {j.salary_text}")

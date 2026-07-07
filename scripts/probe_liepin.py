@@ -14,7 +14,7 @@
    帮我们缩小范围。
 
 运行:
-    venv/Scripts/python.exe probe_liepin.py
+    venv/Scripts/python.exe scripts/probe_liepin.py
 
 产出:
     debug_liepin.html   —— 渲染后的完整 HTML(用浏览器或编辑器打开看结构)

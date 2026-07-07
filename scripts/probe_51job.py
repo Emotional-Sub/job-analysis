@@ -14,7 +14,7 @@
    把候选打印出来。
 
 运行:
-    venv/Scripts/python.exe probe_51job.py
+    venv/Scripts/python.exe scripts/probe_51job.py
 
 产出:
     debug_page.html   —— 渲染后的完整 HTML(用浏览器或编辑器打开看结构)
