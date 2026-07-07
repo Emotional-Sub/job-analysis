@@ -17,4 +17,5 @@ app = create_app()
 
 if __name__ == "__main__":
     # host=127.0.0.1 仅本机访问;如需局域网访问改成 0.0.0.0
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    # debug=False:关闭自动重载,避免改项目文件时 reloader 反复分裂出多进程占端口
+    app.run(host="127.0.0.1", port=5000, debug=False)
