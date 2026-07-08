@@ -104,6 +104,30 @@ def _load_dataframe() -> pd.DataFrame:
     return df
 
 
+def _experience_weights(experience: pd.Series) -> np.ndarray:
+    """按经验档算样本权重,缓解"1年以下"占 74% 导致的类别不平衡。
+
+    用逆频率权重(balanced):某档权重 = 总样本 /(档数 × 该档样本数)。
+    效果:样本越多的档单条权重越低、越少的档越高,让模型训练时不被
+    低经验样本淹没,各经验档"话语权"趋于均衡。权重均值归一化到 1,
+    不改变整体量级,只重新分配关注度 —— 数据一条不丢(A 方案:类别加权)。
+
+    为什么不直接降采样:降采样会扔掉上万条真实低经验样本,且高经验档
+    (365/658 条)本就少,均衡度提升有限。加权不丢数据、答辩好讲。
+    """
+    counts = experience.value_counts()
+    n_total = len(experience)
+    n_classes = len(counts)
+    # 每档的逆频率权重
+    w_per_class = {
+        cls: n_total / (n_classes * cnt) for cls, cnt in counts.items()
+    }
+    w = experience.map(w_per_class).to_numpy(dtype=float)
+    # 归一化到均值 1,避免影响学习率/正则的量级尺度
+    w = w / w.mean()
+    return w
+
+
 def _build_models() -> Dict[str, object]:
     """返回待对比的三个回归模型(名称 -> 未训练的模型实例)。"""
     return {
@@ -142,10 +166,15 @@ def train() -> Dict:
 
     X = df[FEATURES]
     y = df["salary_avg"]
+    # 样本权重(按经验档逆频率),用于训练时缓解类别不平衡(A 方案)
+    w = _experience_weights(df["experience"])
 
-    # 留出测试集用于报告最终误差(交叉验证用于选型)
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
+    # 留出测试集用于报告最终误差(交叉验证用于选型)。
+    # stratify=经验档(C 方案):保证训练/测试集的经验分布与全量一致,
+    # 否则完全随机划分下高经验档(仅几百条)可能在测试集里只剩个位数,
+    # 评估不可信。权重跟着一起划分,保持与 X/y 行对齐。
+    X_train, X_test, y_train, y_test, w_train, w_test = train_test_split(
+        X, y, w, test_size=0.2, random_state=42, stratify=df["experience"]
     )
 
     scores: List[Dict] = []
@@ -155,10 +184,15 @@ def train() -> Dict:
 
     for name, model in _build_models().items():
         pipe = _make_pipeline(model)
-        # 5 折交叉验证的 R²(在训练集上,用于公平选型)
-        cv_r2 = cross_val_score(pipe, X_train, y_train, cv=5, scoring="r2")
-        # 在测试集上训练后评估 MAE / R²(用于报告)
-        pipe.fit(X_train, y_train)
+        # Pipeline 里给最后一步(model)传样本权重的语法:"<步骤名>__sample_weight"。
+        # 步骤名是 "model"(见 _make_pipeline)。三个模型都支持 sample_weight。
+        fit_kw = {"model__sample_weight": w_train}
+        # 5 折交叉验证的 R²(在训练集上,用于公平选型)。带权重训练(A 方案)。
+        cv_r2 = cross_val_score(
+            pipe, X_train, y_train, cv=5, scoring="r2", params=fit_kw
+        )
+        # 在测试集上训练后评估 MAE / R²(用于报告),同样带权重训练
+        pipe.fit(X_train, y_train, **fit_kw)
         pred = pipe.predict(X_test)
         mae = mean_absolute_error(y_test, pred)
         r2 = r2_score(y_test, pred)
@@ -175,8 +209,9 @@ def train() -> Dict:
             best_name = name
             best_pipeline = pipe
 
-    # 用全量数据重训最优模型(交叉验证只为选型,最终模型吃满所有数据)
-    best_pipeline.fit(X, y)
+    # 用全量数据重训最优模型(交叉验证只为选型,最终模型吃满所有数据)。
+    # 同样带全量样本权重(A 方案),与上面的选型口径一致。
+    best_pipeline.fit(X, y, model__sample_weight=w)
 
     # 特征重要性:用置换重要性(permutation importance)。
     # 原理:训练后把某一列的值随机打乱,看模型 R² 掉多少 —— 掉得越多说明

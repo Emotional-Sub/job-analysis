@@ -328,6 +328,9 @@ def run_real() -> None:
                     print(f"[liepin] 跳过已抓:[{idx}/{total_cities}] {city_name} × {kw}")
                     continue
                 print(f"[liepin] [{idx}/{total_cities}] 城市:{city_name}  关键词:{kw}")
+                # 被反爬拦时全程"等不到卡片",saw_cards 保持 False —— 用它区分
+                # 「真抓完(可能因去重存 0 条)」和「被封颗粒无收」,后者不标记断点,下次重抓。
+                saw_cards = False
                 # 逐经验档抓:每档单独一轮请求(workYearCode 单选),在源头筛掉实习岗
                 for wy_label, wy_code in WORK_YEAR_CODES:
                     print(f"[liepin]   经验档:{wy_label}(workYearCode={wy_code})")
@@ -385,6 +388,7 @@ def run_real() -> None:
 
                         if cards:
                             empty_streak = 0
+                            saw_cards = True
                             total += clean_and_save(cards)
                         else:
                             # 页面出来了但一条没抓到(可能全被实习岗过滤,或结构变了)
@@ -398,8 +402,13 @@ def run_real() -> None:
                         config.sleep_between_requests()
 
                 # 这一组(城市×关键词,含所有经验档)抓完,标记进度并落盘。
-                # (中途硬崩不会走到这里,故不会被误标记,下次会重抓)
-                cp.mark(city_name, kw)
+                # 只有真见到过岗位卡片才算抓完;全程被反爬拦(saw_cards=False)
+                # 不标记,下次自动重抓这一组,避免"被封却记成已完成"。
+                # (中途硬崩也不会走到这里,故不会被误标记,下次会重抓)
+                if saw_cards:
+                    cp.mark(city_name, kw)
+                else:
+                    print(f"[liepin] 未见任何岗位卡片(疑似被拦),不标记 {city_name} × {kw},下次重抓")
 
                 # 每组抓完存一次登录态,中途崩了也不丢已保存的 cookie
                 try:
