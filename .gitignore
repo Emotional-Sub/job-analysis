@@ -29,9 +29,17 @@ preview_*.txt
 city_after.txt
 
 # 断点续抓进度缓存(纯本地进度,删掉=从头抓,不该进 git)
-# .bak 是手动抓数据时的断点备份,同样只在本地保留
+# .bak/.bak3/.pre_fix_bak/.wipebak_* 都是手动抓数据/清库前的断点备份,只留本地
 .checkpoint_*.json
 .checkpoint_*.json.bak
+.checkpoint_*.json.bak[0-9]
+.checkpoint_*.json.pre_fix_bak
+.checkpoint_*.json.wipebak_*
+
+# 清库/清洗前的整表备份(job.csv / raw_job.csv 快照 + _backup_ 目录),
+# 是反悔时的救命数据,保留本地但绝不进 git
+_backup_*/
+*_backup_[0-9]*.csv
 
 # IDE
 .idea/
