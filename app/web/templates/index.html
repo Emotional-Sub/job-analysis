@@ -658,21 +658,38 @@
         }
     });
 
+    // 薪资分布直方图(月薪区间 × 岗位数):看薪资集中区间与右偏程度
+    fetchJSON('/api/salary_histogram').then(d => {
+        const chart = echarts.init(document.getElementById('chart_hist'));
+        if (!d.counts || !d.counts.length) {
+            chart.setOption({ title: { text: '暂无薪资数据', left: 'center', top: 'center', textStyle: { fontSize: 13, color: '#aaa' } } });
+            return;
+        }
+        chart.setOption({
+            tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' },
+                       formatter: p => `${p[0].name}<br/>岗位数: ${p[0].value}` },
+            grid: { left: '8%', right: '5%', top: '10%', bottom: '10%' },
+            xAxis: { type: 'category', data: d.labels, axisLabel: { rotate: 30 } },
+            yAxis: { type: 'value', name: '岗位数' },
+            series: [{
+                type: 'bar',
+                data: d.counts,
+                itemStyle: { color: '#4a89dc', borderRadius: [4, 4, 0, 0] },
+                label: { show: true, position: 'top' }
+            }]
+        });
+    });
+
     // 薪资影响因素相关性热力图(学历/经验/技能数/月薪 两两皮尔逊相关)
     fetchJSON('/api/salary_correlation').then(d => {
         const chart = echarts.init(document.getElementById('chart_corr'));
         const factors = d.factors;
-        if (!d.matrix || !d.matrix.length) {
+        if (!d.data || !d.data.length) {
             chart.setOption({ title: { text: '样本不足,无法计算相关性', left: 'center', top: 'center', textStyle: { fontSize: 13, color: '#aaa' } } });
             return;
         }
-        // 把矩阵摊平成 [x, y, 相关系数] 供热力图用
-        const data = [];
-        for (let i = 0; i < factors.length; i++) {
-            for (let j = 0; j < factors.length; j++) {
-                data.push([j, i, d.matrix[i][j]]);
-            }
-        }
+        // 后端已把相关矩阵摊平成 [x, y, 相关系数],直接用
+        const data = d.data;
         chart.setOption({
             tooltip: { formatter: p => `${factors[p.value[1]]} × ${factors[p.value[0]]}<br/>相关系数: ${p.value[2]}` },
             grid: { left: '14%', right: '6%', top: '6%', bottom: '16%' },
