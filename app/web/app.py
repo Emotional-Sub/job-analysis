@@ -143,13 +143,34 @@ def create_app() -> Flask:
     @app.route("/api/predict", methods=["POST"])
     def api_predict():
         """接收 {city, education, experience, keyword},返回预测月薪(千元)。"""
+        report = ml_predict.get_report()
+        if not report:
+            return jsonify({"ok": False, "msg": "模型未训练,请先运行 train_model.py"})
+
         data = request.get_json(silent=True) or {}
-        pred = ml_predict.predict(
-            city=data.get("city"),
-            education=data.get("education"),
-            experience=data.get("experience"),
-            keyword=data.get("keyword"),
-        )
+        fields = ("city", "education", "experience", "keyword")
+        opts = report.get("feature_options", {})
+
+        # 输入校验:四个字段必须都是非空字符串,且取值在训练时见过的可选集合内。
+        # 不校验会有两个问题:①空 body 全 None 也能返回一个"看起来合理"的假预测;
+        # ②传入 list/dict 等类型让 OneHotEncoder 抛异常变成 500。
+        for f in fields:
+            v = data.get(f)
+            if not isinstance(v, str) or not v.strip():
+                return jsonify({"ok": False, "msg": f"字段 {f} 缺失或格式非法(需非空字符串)"}), 400
+            allowed = opts.get(f)
+            if allowed and v not in allowed:
+                return jsonify({"ok": False, "msg": f"字段 {f} 的值 '{v}' 不在可选范围内"}), 400
+
+        try:
+            pred = ml_predict.predict(
+                city=data["city"], education=data["education"],
+                experience=data["experience"], keyword=data["keyword"],
+            )
+        except Exception:
+            # 兜底:任何预测期异常都返回干净的 400,而不是泄露堆栈的 500
+            return jsonify({"ok": False, "msg": "预测失败,请检查输入"}), 400
+
         if pred is None:
             return jsonify({"ok": False, "msg": "模型未训练,请先运行 train_model.py"})
         return jsonify({"ok": True, "salary": pred})

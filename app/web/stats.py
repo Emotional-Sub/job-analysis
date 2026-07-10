@@ -76,7 +76,13 @@ def salary_by_keyword() -> Dict:
 
 
 def jobs_by_city(top_n: int = 10) -> Dict:
-    """各城市岗位数量 Top N,用于柱状图/地图。"""
+    """各城市岗位数量 Top N,用于柱状图/地图。
+
+    只统计 config.CITIES 目标城市,与 salary_by_city 口径一致 —— 否则 51job 带出的
+    昆山/常熟等周边县市会混进"岗位数 Top10",而隔壁"薪资 Top10"却过滤掉了它们,
+    两张相邻图城市集不一致,看着矛盾。
+    """
+    target_cities = [c.strip() for c in config.CITIES]
     session = get_session()
     try:
         rows = (
@@ -84,7 +90,7 @@ def jobs_by_city(top_n: int = 10) -> Dict:
                 Job.city,
                 func.count(Job.id).label("cnt"),
             )
-            .filter(Job.city.isnot(None))
+            .filter(Job.city.in_(target_cities))
             .group_by(Job.city)
             .order_by(func.count(Job.id).desc())
             .limit(top_n)
@@ -466,8 +472,10 @@ def salary_factor_correlation() -> Dict:
     影响已在"各城市薪资""各职位薪资"和模型特征重要性里体现)。
 
     做法:把学历/经验按等级映射成整数,技能数量由 tags 现算,与 salary_avg
-    一起组成矩阵,算两两皮尔逊相关系数。返回 {factors, matrix},matrix[i][j]
-    是因素 i 与 j 的相关系数(-1~1),对角线为 1。
+    一起组成矩阵,算两两**斯皮尔曼秩相关**系数。学历/经验是有序类别(等级),
+    Spearman(基于排名)比 Pearson 更适合有序数据,也对薪资的右偏更稳健。
+    返回 {factors, data, n_samples, n_dropped}:data[k]=[x索引,y索引,系数],对角线为 1;
+    n_dropped 是因学历/经验标签不在映射表内而被丢弃的行数(标签漂移时便于发现)。
     """
     session = get_session()
     try:
@@ -481,10 +489,12 @@ def salary_factor_correlation() -> Dict:
     finally:
         session.close()
 
-    # 组装成数值样本:每行 [学历, 经验, 技能数, 月薪];缺有序映射的行跳过
+    # 组装成数值样本:每行 [学历, 经验, 技能数, 月薪];缺有序映射的行跳过并计数
     edu_v, exp_v, skill_v, sal_v = [], [], [], []
+    n_dropped = 0
     for edu, exp, tags, sal in rows:
         if edu not in _EDU_ORDER or exp not in _EXP_ORDER:
+            n_dropped += 1  # 标签不在有序映射表内(可能是新站点措辞/标签漂移),记录而非静默吞掉
             continue
         edu_v.append(_EDU_ORDER[edu])
         exp_v.append(_EXP_ORDER[exp])
@@ -507,14 +517,31 @@ def salary_factor_correlation() -> Dict:
             return 0.0
         return cov / (vx ** 0.5 * vy ** 0.5)
 
+    # 把一列值转成排名(平均秩处理并列)。Spearman = 在排名上做 Pearson。
+    def _to_ranks(vals: List[float]) -> List[float]:
+        order = sorted(range(len(vals)), key=lambda i: vals[i])
+        ranks = [0.0] * len(vals)
+        i = 0
+        while i < len(order):
+            j = i
+            while j + 1 < len(order) and vals[order[j + 1]] == vals[order[i]]:
+                j += 1
+            avg_rank = (i + j) / 2.0 + 1  # 并列取平均秩(1 基)
+            for k in range(i, j + 1):
+                ranks[order[k]] = avg_rank
+            i = j + 1
+        return ranks
+
+    rank_cols = [_to_ranks(c) for c in cols]
+
     # ECharts 热力图吃 [x索引, y索引, 值] 三元组
     data = []
     for i in range(len(factors)):
         for j in range(len(factors)):
-            r = 1.0 if i == j else _pearson(cols[i], cols[j])
+            r = 1.0 if i == j else _pearson(rank_cols[i], rank_cols[j])
             data.append([j, i, round(r, 2)])
 
-    return {"factors": factors, "data": data, "n_samples": len(sal_v)}
+    return {"factors": factors, "data": data, "n_samples": len(sal_v), "n_dropped": n_dropped}
 
 
 def salary_histogram(bin_width: int = 5) -> Dict:

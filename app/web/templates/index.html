@@ -301,10 +301,21 @@
     <div class="footer">招聘数据可视化分析平台 · 毕业设计</div>
 
     <script>
-    // 统一的取数函数
+    // 统一的取数函数。接口出错(500/网络断)时抛出,由各图的 .catch 兜底提示,
+    // 不再让图表静默空白、只在控制台留个错。
     async function fetchJSON(url) {
         const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`${url} 返回 ${resp.status}`);
         return await resp.json();
+    }
+
+    // 在指定容器上显示"加载失败"占位(接口挂掉时用),避免图表区一片空白无反馈。
+    function showChartError(domId, msg) {
+        const el = document.getElementById(domId);
+        if (!el) return;
+        const chart = echarts.init(el);
+        chart.setOption({ title: { text: msg || '加载失败', left: 'center', top: 'center',
+            textStyle: { fontSize: 13, color: '#c0392b' } } });
     }
 
     // 主题色
@@ -651,8 +662,15 @@
         const d = await res.json();
         const box = document.getElementById('pf_result');
         if (d.ok) {
-            box.innerHTML = `预测月薪约 <span class="val">${d.salary}</span> K` +
-                `　(${body.city} · ${body.keyword} · ${body.education} · ${body.experience})`;
+            // 用 DOM 构建而非 innerHTML 拼接:body.* 来自下拉框(值源自抓取数据),
+            // 若含 HTML/脚本片段,innerHTML 会执行它(XSS)。textContent 只当纯文本。
+            box.textContent = '';
+            box.append('预测月薪约 ');
+            const val = document.createElement('span');
+            val.className = 'val';
+            val.textContent = d.salary;
+            box.append(val);
+            box.append(` K　(${body.city} · ${body.keyword} · ${body.education} · ${body.experience})`);
         } else {
             box.textContent = d.msg || '预测失败';
         }
@@ -678,9 +696,9 @@
                 label: { show: true, position: 'top' }
             }]
         });
-    });
+    }).catch(() => showChartError('chart_hist', '薪资分布加载失败'));
 
-    // 薪资影响因素相关性热力图(学历/经验/技能数/月薪 两两皮尔逊相关)
+    // 薪资影响因素相关性热力图(学历/经验/技能数/月薪 两两斯皮尔曼秩相关)
     fetchJSON('/api/salary_correlation').then(d => {
         const chart = echarts.init(document.getElementById('chart_corr'));
         const factors = d.factors;
@@ -708,7 +726,7 @@
                 emphasis: { itemStyle: { shadowBlur: 8, shadowColor: 'rgba(0,0,0,0.4)' } }
             }]
         });
-    });
+    }).catch(() => showChartError('chart_corr', '相关性加载失败'));
 
     // 窗口缩放时图表自适应
     window.addEventListener('resize', () => {
