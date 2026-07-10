@@ -17,6 +17,7 @@
 """
 import os
 import pickle
+import threading
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -24,7 +25,7 @@ import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
 from sklearn.linear_model import LinearRegression
-from sklearn.model_selection import cross_val_score, train_test_split
+from sklearn.model_selection import KFold, cross_val_score, train_test_split
 from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.inspection import permutation_importance
 from sklearn.pipeline import Pipeline
@@ -182,6 +183,11 @@ def train() -> Dict:
     best_r2 = float("-inf")
     best_pipeline = None
 
+    # 显式用「打乱」的 5 折 KFold。数据是按抓取批次(城市→关键词→来源)插入的,
+    # 默认 cv=5 等价 shuffle=False,折叠会按批次切分导致某些城市/来源在折内被过度
+    # 代表,CV-R² 高方差且选型结果run-to-run 不稳。shuffle=True + 固定种子保证可复现。
+    cv = KFold(n_splits=5, shuffle=True, random_state=42)
+
     for name, model in _build_models().items():
         pipe = _make_pipeline(model)
         # Pipeline 里给最后一步(model)传样本权重的语法:"<步骤名>__sample_weight"。
@@ -189,7 +195,7 @@ def train() -> Dict:
         fit_kw = {"model__sample_weight": w_train}
         # 5 折交叉验证的 R²(在训练集上,用于公平选型)。带权重训练(A 方案)。
         cv_r2 = cross_val_score(
-            pipe, X_train, y_train, cv=5, scoring="r2", params=fit_kw
+            pipe, X_train, y_train, cv=cv, scoring="r2", params=fit_kw
         )
         # 在测试集上训练后评估 MAE / R²(用于报告),同样带权重训练
         pipe.fit(X_train, y_train, **fit_kw)
@@ -209,15 +215,13 @@ def train() -> Dict:
             best_name = name
             best_pipeline = pipe
 
-    # 用全量数据重训最优模型(交叉验证只为选型,最终模型吃满所有数据)。
-    # 同样带全量样本权重(A 方案),与上面的选型口径一致。
-    best_pipeline.fit(X, y, model__sample_weight=w)
-
     # 特征重要性:用置换重要性(permutation importance)。
-    # 原理:训练后把某一列的值随机打乱,看模型 R² 掉多少 —— 掉得越多说明
-    # 该特征越关键。它模型无关(线性/树都能用)、且直接反映"对预测的贡献",
-    # 比树自带的 feature_importances_ 更公平,论文里也好解释。
-    # 在测试集上算,避免用训练集高估。n_repeats 多算几次取均值更稳。
+    # 原理:把某一列的值随机打乱,看模型 R² 掉多少 —— 掉得越多说明该特征越关键。
+    # 它模型无关(线性/树都能用)、直接反映"对预测的贡献",比树自带的
+    # feature_importances_ 更公平,论文里也好解释。
+    # ⚠️ 必须在「只用训练集拟合」的模型 + 留出的测试集上算(此刻 best_pipeline 仍是
+    # 循环里的 train-only 拟合结果)。若先做下面的全量 refit(X 含 X_test),再在
+    # X_test 上算,测试集就成了样内数据,重要性会被高估。故顺序:先算重要性,再全量重训。
     perm = permutation_importance(
         best_pipeline, X_test, y_test,
         n_repeats=10, random_state=42, scoring="r2",
@@ -247,6 +251,10 @@ def train() -> Dict:
         else:
             feature_options[col] = sorted(df[col].dropna().unique().tolist())
 
+    # 重要性算完后,再用全量数据重训最优模型持久化(交叉验证/重要性只为选型与解释,
+    # 最终上线模型吃满所有数据)。带全量样本权重(A 方案),与选型口径一致。
+    best_pipeline.fit(X, y, model__sample_weight=w)
+
     report = {
         "n_samples": n,
         "scores": scores,
@@ -264,16 +272,20 @@ def train() -> Dict:
 
 # ---------------- 预测(Web 端调用) ----------------
 _CACHE: Optional[Dict] = None
+_CACHE_LOCK = threading.Lock()
 
 
 def _load() -> Optional[Dict]:
-    """加载并缓存 model.pkl。没训练过则返回 None。"""
+    """加载并缓存 model.pkl。没训练过则返回 None。线程安全(Flask 多线程下首次并发不会重复加载)。"""
     global _CACHE
     if _CACHE is None:
-        if not os.path.exists(MODEL_PATH):
-            return None
-        with open(MODEL_PATH, "rb") as f:
-            _CACHE = pickle.load(f)
+        with _CACHE_LOCK:
+            # 双重检查:拿到锁后再确认一次,避免多个线程都进来重复读盘
+            if _CACHE is None:
+                if not os.path.exists(MODEL_PATH):
+                    return None
+                with open(MODEL_PATH, "rb") as f:
+                    _CACHE = pickle.load(f)
     return _CACHE
 
 
