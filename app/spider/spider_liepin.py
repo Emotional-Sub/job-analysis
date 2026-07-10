@@ -19,6 +19,7 @@
 import re
 import time
 from typing import List, Dict
+from urllib.parse import quote_plus
 
 from app import config
 from app.db.session import init_db
@@ -342,8 +343,9 @@ def run_real() -> None:
                         #   pageSize=40 每页拉满 40 条,产出翻倍
                         #   city 与 dq 都传城市码(真实 URL 两者一致)
                         #   workYearCode 按经验档筛,源头排除实习岗
+                        # key 可能含 +/# 等特殊字符(如 C++/C#),必须 URL 编码
                         url = (
-                            f"https://www.liepin.com/zhaopin/?key={kw}"
+                            f"https://www.liepin.com/zhaopin/?key={quote_plus(kw)}"
                             f"&currentPage={pg}&pageSize=40&workYearCode={wy_code}"
                         )
                         if dq_code:

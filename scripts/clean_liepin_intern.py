@@ -31,13 +31,26 @@ from statistics import median
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db.session import get_session
-from app.db.models import Job
+from app.db.models import Job, RawJob
 from app.spider.spider_liepin import _INTERN_KWS
 
 
+# 否定表述:标题含"实习"等词但明确声明"不招实习/非实习",实为正式岗,别误删
+# (与 clean_51job_intern 保持一致的守卫)
+_NEGATION_KWS = ("不招实习", "非实习", "不含实习", "拒绝实习")
+
+
 def _is_intern_title(title: str) -> bool:
-    """库里没存 URL,只能靠标题判断是否实习/兼职岗。"""
-    return bool(title) and any(k in title for k in _INTERN_KWS)
+    """库里没存 URL,只能靠标题判断是否实习/兼职岗。
+
+    先排除否定表述(如"全职 不招实习生"),再按关键词匹配,否则"不招实习生"
+    会被"实习"命中而误删正式岗。
+    """
+    if not title:
+        return False
+    if any(neg in title for neg in _NEGATION_KWS):
+        return False
+    return any(k in title for k in _INTERN_KWS)
 
 
 def _median_salary(jobs) -> float:
@@ -67,11 +80,17 @@ def main(apply: bool) -> None:
                 print(f"  [{j.title}]  {j.salary_text}")
             return
 
-        # 真正删除
+        # 真正删除:job 与 raw_job 两表同删(按 source+job_key 对齐),保持口径一致
+        raw_del = 0
         for j in interns:
+            raw_del += (
+                session.query(RawJob)
+                .filter_by(source=j.source, job_key=j.job_key)
+                .delete()
+            )
             session.delete(j)
         session.commit()
-        print(f"\n[已执行] 删除 {len(interns)} 条猎聘实习岗,保留 {len(keep)} 条正式岗。")
+        print(f"\n[已执行] job 删除 {len(interns)} 条猎聘实习岗(raw_job 同步删 {raw_del} 条),保留 {len(keep)} 条正式岗。")
         print("提示:薪资预测模型请重跑 train_model.py,用干净数据重训。")
     except Exception:
         session.rollback()

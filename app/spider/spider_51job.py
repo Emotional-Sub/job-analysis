@@ -16,6 +16,7 @@
 import json
 import time
 from typing import List, Dict
+from urllib.parse import quote_plus
 
 from app import config
 from app.db.session import init_db
@@ -216,15 +217,26 @@ def run_real() -> None:
                     print(f"[real] 跳过已抓:[{idx}/{total_cities}] {city_name} × {kw}")
                     continue
                 print(f"[real] [{idx}/{total_cities}] 城市:{city_name}  关键词:{kw}")
+                # 本组是否真见到过岗位卡片。只有见到卡片才在组末标记"已抓完",
+                # 否则被反爬全程拦截(每页都等不到卡片)会被误标为完成、续抓永久跳过,
+                # 造成城市级数据空洞。此前 51job 缺这个守卫(liepin 已有),现补齐。
+                saw_cards = False
                 for pg in range(1, config.MAX_PAGES + 1):
+                    # 关键词可能含 +/# 等特殊字符(如 C++/C#),必须 URL 编码,
+                    # 否则 + 被当空格、# 被当锚点,搜索词被截断成错误查询。
                     url = (
-                        f"https://we.51job.com/pc/search?keyword={kw}"
+                        f"https://we.51job.com/pc/search?keyword={quote_plus(kw)}"
                         f"&searchType=2&pageNum={pg}"
                     )
                     # jobArea 是 51job 的城市编码;拿不到编码就退回不带(全国)
                     if area_code:
-                        url += f"&jobArea={area_code}"
-                    page.goto(url, timeout=60000)
+                        url += f"&jobArea={quote_plus(area_code)}"
+                    # goto 加兜底:单次网络抖动/超时不该让整轮崩溃(与 liepin 一致)
+                    try:
+                        page.goto(url, timeout=60000)
+                    except Exception as e:
+                        print(f"    第 {pg} 页:页面打开失败({e}),跳过本页")
+                        continue
                     # 等岗位卡片真正渲染出来(动态加载),最多等 15 秒
                     try:
                         page.wait_for_selector(".joblist-item", timeout=15000)
@@ -233,6 +245,8 @@ def run_real() -> None:
                     page.wait_for_timeout(int(config.request_delay_seconds() * 1000))
 
                     cards = _extract_cards(page)
+                    if cards:
+                        saw_cards = True
                     for c in cards:
                         c["keyword"] = kw
                         c["source"] = "51job"
@@ -244,9 +258,12 @@ def run_real() -> None:
                     print(f"    第 {pg} 页,抓到 {len(cards)} 条")
                     config.sleep_between_requests()
 
-                # 这一组正常抓完,标记进度并落盘。下次重启会跳过这一组。
-                # (中途硬崩的组不会走到这里,故不会被误标记,下次会重抓)
-                cp.mark(city_name, kw)
+                # 只有本组真抓到过卡片才标记"已抓完"并落盘(下次重启跳过)。
+                # 被反爬颗粒无收(saw_cards=False)的组不标记,下次自动重抓。
+                if saw_cards:
+                    cp.mark(city_name, kw)
+                else:
+                    print(f"    [警告] {city_name}×{kw} 全程未见岗位卡片,疑被拦截,不标记,下次重抓")
 
         # 更新登录状态,方便下次复用
         context.storage_state(path=config.STORAGE_STATE)

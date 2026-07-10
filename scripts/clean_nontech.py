@@ -31,7 +31,7 @@ from statistics import mean
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db.session import get_session
-from app.db.models import Job
+from app.db.models import Job, RawJob
 
 # 白保护词:title 含这些技术词就是 IT 岗,无条件保留(优先级高于黑名单)。
 # 覆盖「测试开发工程师」「数据研发」这类同时含黑名单词的真 IT 岗。
@@ -65,22 +65,23 @@ _NONTECH_KWS = (
     "统计员", "调研", "录入", "数据录入", "文员", "助理",
 )
 
-_TECH_SET = tuple(_TECH_KWS)
-_NONTECH_SET = tuple(_NONTECH_KWS)
-
-
 def _is_tech(title: str) -> bool:
     """白保护:含技术词即 IT 岗。"""
-    return bool(title) and any(k in title for k in _TECH_SET)
+    return bool(title) and any(k in title for k in _TECH_KWS)
 
 
 def _is_nontech(title: str) -> bool:
-    """黑名单:白保护之外含非 IT 特征词即判为非 IT 岗。"""
+    """黑名单:白保护之外含非 IT 特征词即判为非 IT 岗。
+
+    ⚠️ 这是**标题子串匹配删除**,本质模糊:如"电商销售数据分析师"含黑名单词
+    "销售"、又没有白保护技术词,会被判为非 IT 岗删掉,但它其实是正经分析岗。
+    因此预览模式会把**全部**待删标题 dump 到文件,务必人工过目后再 --apply。
+    """
     if not title:
         return False
     if _is_tech(title):
         return False
-    return any(k in title for k in _NONTECH_SET)
+    return any(k in title for k in _NONTECH_KWS)
 
 
 def _avg(jobs) -> float:
@@ -106,17 +107,35 @@ def main(apply: bool) -> None:
         print(f"保留(IT岗+存疑岗):        {len(keep)}  平均薪资 {_avg(keep)}K")
 
         if not apply:
+            # 子串匹配删除有误删风险,把全部待删标题写文件供人工逐条核对
+            dump_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "out", "nontech_to_delete.txt"
+            )
+            os.makedirs(os.path.dirname(dump_path), exist_ok=True)
+            with open(dump_path, "w", encoding="utf-8") as f:
+                for j in to_delete:
+                    f.write(f"[{j.city}] {j.title}  ({j.salary_avg}K)  {j.salary_text}\n")
             print("\n[预览模式] 未做任何改动。确认无误后加 --apply 真正删除:")
             print("    venv/Scripts/python.exe scripts/clean_nontech.py --apply")
+            print(f"\n⚠️ 子串匹配删除有误删风险,已把全部 {len(to_delete)} 条待删标题写入:")
+            print(f"    {dump_path}")
+            print("  请打开该文件逐条核对,确认没有误伤正经分析岗(如'电商销售数据分析师')再 --apply。")
             print("\n将删除的非 IT 岗抽样(前 40 条):")
             for j in to_delete[:40]:
                 print(f"  [{j.city}] {j.title}  ({j.salary_avg}K)")
             return
 
+        # 两表同删(按 source+job_key 对齐),保持口径一致
+        raw_del = 0
         for j in to_delete:
+            raw_del += (
+                session.query(RawJob)
+                .filter_by(source=j.source, job_key=j.job_key)
+                .delete()
+            )
             session.delete(j)
         session.commit()
-        print(f"\n[已执行] 删除 {len(to_delete)} 条非 IT 岗,保留 {len(keep)} 条。")
+        print(f"\n[已执行] job 删除 {len(to_delete)} 条非 IT 岗(raw_job 同步删 {raw_del} 条),保留 {len(keep)} 条。")
         print("提示:薪资预测模型请重跑 train_model.py,用干净数据重训。")
     except Exception:
         session.rollback()

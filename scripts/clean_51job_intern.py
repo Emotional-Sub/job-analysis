@@ -12,8 +12,8 @@
   - 薪资预测模型的训练数据
 
 占比虽小,但清掉能让统计更贴合正式岗口径,论文"数据清洗"环节也好交代。
-清理只动 job 分析表,raw_job 原始表保留 —— 符合"采集/分析解耦"设计,
-清洗口径若再调整,仍可从 raw_job 重新生成。
+清理 job 与 raw_job **两表同删**(按 source+job_key 对齐),保持两表口径一致
+——否则 db_health_check 的口径检查会报两表条数不等。
 
 判定口径
 --------
@@ -33,7 +33,7 @@ from statistics import median
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db.session import get_session
-from app.db.models import Job
+from app.db.models import Job, RawJob
 from app.spider.spider_liepin import _INTERN_KWS
 
 
@@ -81,11 +81,17 @@ def main(apply: bool) -> None:
                 print(f"  [{j.city}] [{j.title}]  {j.salary_text}")
             return
 
-        # 真正删除
+        # 真正删除:job 与 raw_job 两表同删(按 source+job_key 对齐),保持口径一致
+        raw_del = 0
         for j in interns:
+            raw_del += (
+                session.query(RawJob)
+                .filter_by(source=j.source, job_key=j.job_key)
+                .delete()
+            )
             session.delete(j)
         session.commit()
-        print(f"\n[已执行] 删除 {len(interns)} 条 51job 实习岗,保留 {len(keep)} 条正式岗。")
+        print(f"\n[已执行] job 删除 {len(interns)} 条 51job 实习岗(raw_job 同步删 {raw_del} 条),保留 {len(keep)} 条正式岗。")
         print("提示:薪资预测模型请重跑 train_model.py,用干净数据重训。")
     except Exception:
         session.rollback()

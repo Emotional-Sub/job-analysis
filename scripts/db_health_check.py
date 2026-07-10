@@ -6,6 +6,11 @@
 import os
 import sys
 
+# 终端 GBK,而本脚本会打印 ⚠️ 等字符——且恰好在"检测到问题"时才打
+# (口径不一致/有空值),不重配 stdout 的话体检会在发现问题的瞬间 UnicodeEncodeError 崩掉。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sqlalchemy import text

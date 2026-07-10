@@ -22,17 +22,12 @@ import sys
 # 脚本挪进 scripts/ 后,需把项目根目录加进 sys.path,否则 import app 会失败。
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from app import config
 from app.db.session import get_session
-from app.db.models import Job
+from app.db.models import Job, RawJob
 
 # 目标 20 城(官方顺序)。只保留这些城市的数据,其余全删。
-CITY_WHITELIST = [
-    "上海", "北京", "深圳", "重庆", "广州",
-    "苏州", "成都", "杭州", "武汉", "南京",
-    "宁波", "天津", "青岛", "无锡", "长沙",
-    "郑州", "福州", "济南", "合肥", "西安",
-]
-_WHITELIST_SET = set(CITY_WHITELIST)
+_WHITELIST_SET = set(c.strip() for c in config.CITIES)
 
 
 def _in_whitelist(city) -> bool:
@@ -65,10 +60,19 @@ def main(apply: bool) -> None:
             print("    venv/Scripts/python.exe scripts/clean_offlist_cities.py --apply")
             return
 
+        # 两表同删:job 按对象删,raw_job 按同一"名单外 city"条件删。
+        # job/raw_job 的 city 是一起写入的,两边都清名单外城市后口径保持一致。
         for j in to_delete:
             session.delete(j)
+        # raw_job:city 为空/None 或不在白名单的都删
+        raw_rows = session.query(RawJob).all()
+        raw_del = 0
+        for r in raw_rows:
+            if not _in_whitelist(r.city):
+                session.delete(r)
+                raw_del += 1
         session.commit()
-        print(f"\n[已执行] 删除 {len(to_delete)} 条名单外数据,保留 {len(keep)} 条。")
+        print(f"\n[已执行] job 删除 {len(to_delete)} 条名单外数据(raw_job 同步删 {raw_del} 条),job 保留 {len(keep)} 条。")
     except Exception:
         session.rollback()
         raise
