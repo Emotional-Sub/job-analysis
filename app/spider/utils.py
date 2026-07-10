@@ -57,7 +57,7 @@ def parse_salary(text: Optional[str]) -> Tuple[Optional[float], Optional[float],
 
     # 提取 "·N薪" 里的薪资月数,默认 12。只有月薪才有"多发几个月"的说法。
     months = 12
-    m_months = re.search(r"[·xX*](\d{1,2})薪", t)
+    m_months = re.search(r"[·xX*,，/、](\d{1,2})薪", t)
     if m_months:
         months = int(m_months.group(1))
 
@@ -119,6 +119,8 @@ def clean_education(text: Optional[str]) -> Optional[str]:
     t = text.strip()
     mapping = [
         ("博士", "博士"),
+        ("EMBA", "硕士"),
+        ("MBA", "硕士"),
         ("硕士", "硕士"),
         ("研究生", "硕士"),
         ("本科", "本科"),
@@ -126,6 +128,7 @@ def clean_education(text: Optional[str]) -> Optional[str]:
         ("专科", "大专"),
         ("高中", "高中及以下"),
         ("中专", "高中及以下"),
+        ("初中", "高中及以下"),
     ]
     for kw, norm in mapping:
         if kw in t:
@@ -134,23 +137,54 @@ def clean_education(text: Optional[str]) -> Optional[str]:
 
 
 def clean_experience(text: Optional[str]) -> Optional[str]:
-    """把经验要求归一化成固定几档。"""
+    """
+    把经验要求归一化成固定几档:应届/不限 · 1年以下 · 1-3年 · 3-5年 · 5-10年 · 10年以上。
+
+    ⚠️ 关键:原始文本大量是区间("1-3年")或下界("3年及以上")或上界("5年以下"),
+    绝不能只取"第一个数字"当年限——那会把"1-3年"错判成"1年以下"(取到 1),
+    把"3年及以上"错判成"1-3年"。此前的实现正是这个 off-by-one,导致约 1.5 万条
+    真实的"1-3年"被误标进"1年以下",严重污染经验维度。
+
+    归档口径:
+      - 区间 "a-b年"       -> 取下界 a(该岗最低要求 a 年),按"含 a 的桶"入档
+      - "N年以上/及以上"    -> 取 N,按"含 N 的桶"入档
+      - 单值 "N年"         -> 取 N,按"含 N 的桶"入档
+      - "N年以下"          -> 上限语义(招 N 年以内的人,偏初级),按"上界为 N 的桶"入档,
+                             即 3年以下→1-3年、5年以下→3-5年、10年以下→5-10年
+    "含 y 的桶":y<1→1年以下,1<=y<3→1-3年,3<=y<5→3-5年,5<=y<10→5-10年,y>=10→10年以上。
+    """
     if not text:
         return None
     t = text.strip()
-    if "应届" in t or "在校" in t or "经验不限" in t or "不限" in t:
+    # 明确表述应届/无经验要求的,直接归"应届/不限"
+    if any(k in t for k in ("应届", "在校", "经验不限", "无需经验", "不限")):
         return "应届/不限"
-    m = re.search(r"(\d+)", t)
-    if not m:
+    nums = [int(n) for n in re.findall(r"\d+", t)]
+    if not nums:
         return "应届/不限"
-    years = int(m.group(1))
-    if years <= 1:
+
+    if "以下" in t:
+        # 上限语义:N 是天花板,归到"上界为 N 的那个桶"(N<=1 即 1年以下)
+        cap = nums[0]
+        if cap <= 1:
+            return "1年以下"
+        if cap <= 3:
+            return "1-3年"
+        if cap <= 5:
+            return "3-5年"
+        if cap <= 10:
+            return "5-10年"
+        return "10年以上"
+
+    # 区间取下界(最低要求年限);单值/以上取给定数值。按"含 y 的桶"入档。
+    years = min(nums) if len(nums) > 1 else nums[0]
+    if years < 1:
         return "1年以下"
-    if years <= 3:
+    if years < 3:
         return "1-3年"
-    if years <= 5:
+    if years < 5:
         return "3-5年"
-    if years <= 10:
+    if years < 10:
         return "5-10年"
     return "10年以上"
 
@@ -208,6 +242,21 @@ SKILL_DICT = {
 }
 
 
+def _alias_hit(alias: str, blob: str) -> bool:
+    """
+    判断别名是否命中文本 blob(已小写)。
+
+    ⚠️ 纯英文短别名(ml/dl/ts/js/go/ios 等)必须用"词边界"匹配,否则会子串误伤:
+    "ml" 是 "html" 的子串 → 任何含 HTML 的标题会被误标"机器学习";
+    "dl" 命中 "middle","ts" 命中 "charts","js" 命中 "jsp" 等同理。
+    对全 ASCII 字母的别名用前后非字母断言;含中文/符号(c++/.net/中文词)的别名保留子串匹配。
+    """
+    if alias.isascii() and alias.isalpha():
+        # (?<![a-z])alias(?![a-z]):前后都不是英文字母才算独立词
+        return re.search(rf"(?<![a-z]){re.escape(alias)}(?![a-z])", blob) is not None
+    return alias in blob
+
+
 def extract_skills(*texts: Optional[str]) -> str:
     """
     从一段或多段文本(通常是岗位标题)里抽取技能关键词,
@@ -221,7 +270,7 @@ def extract_skills(*texts: Optional[str]) -> str:
         return ""
     found = []
     for norm, aliases in SKILL_DICT.items():
-        if any(alias in blob for alias in aliases):
+        if any(_alias_hit(alias, blob) for alias in aliases):
             found.append(norm)
     return ",".join(found)
 
