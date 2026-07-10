@@ -48,3 +48,8 @@ _backup_*/
 # 系统
 *.DS_Store
 Thumbs.db
+
+# 分析脚本产物(skill_analysis.py 生成的图数据/词云,可由脚本随时重跑生成,不该进 git)
+scripts/out/
+scripts/out/skill_graph.json
+scripts/out/skill_wordcloud.png
